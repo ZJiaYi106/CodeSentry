@@ -1,0 +1,104 @@
+version: "3.9"
+
+# ============================================================
+# CodeSentry — Docker Compose (development)
+# ============================================================
+
+services:
+  # --- Backend API ---
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: codesentry-backend
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      - MODEL_PROVIDER=${MODEL_PROVIDER:-openai}
+      - MODEL_NAME=${MODEL_NAME:-gpt-4o}
+      - MODEL_BASE_URL=${MODEL_BASE_URL:-https://api.openai.com/v1}
+      - MODEL_API_KEY=${MODEL_API_KEY:-sk-your-api-key-here}
+      - MAX_ITERATIONS=${MAX_ITERATIONS:-15}
+      - WORKSPACE_ROOT=/workspace
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=codesentry
+      - POSTGRES_PASSWORD=codesentry_dev
+      - POSTGRES_DB=codesentry
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PROMPT_CACHE_ENABLED=${PROMPT_CACHE_ENABLED:-true}
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+    volumes:
+      - ./backend:/app
+      - workspace_data:/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  # --- Frontend (Vite Dev Server) ---
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: codesentry-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # --- PostgreSQL (Audit Logs) ---
+  postgres:
+    image: postgres:16-alpine
+    container_name: codesentry-postgres
+    environment:
+      POSTGRES_USER: codesentry
+      POSTGRES_PASSWORD: codesentry_dev
+      POSTGRES_DB: codesentry
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codesentry"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # --- ChromaDB (Vector Store) ---
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: codesentry-chromadb
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    restart: unless-stopped
+
+  # --- Redis (Prompt Cache) ---
+  redis:
+    image: redis:7-alpine
+    container_name: codesentry-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  workspace_data:
+  postgres_data:
+  chroma_data:
+  redis_data:
