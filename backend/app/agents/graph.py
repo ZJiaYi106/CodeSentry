@@ -234,3 +234,45 @@ async def run_agent(
     initial = _initial_state(task, workspace_root, max_iterations)
     final_state = await graph.ainvoke(initial)
     return final_state
+
+
+async def run_orchestrator_agent(
+    task: str,
+    workspace_root: str,
+    auto_approve_risk: str = "low",
+) -> dict[str, Any]:
+    """Run the multi-agent Orchestrator workflow.
+
+    This uses the Orchestrator → Analyst → Implementer → Reviewer pipeline
+    instead of the single-agent LangGraph loop.
+
+    Returns a dict with the full orchestrator result, suitable for API responses.
+    """
+    from app.agents.orchestrator import Orchestrator
+    from app.security.permissions import RiskLevel
+
+    risk = RiskLevel(auto_approve_risk)
+    orch = Orchestrator(workspace_root=workspace_root, auto_approve_risk=risk)
+    result = await orch.run(task)
+
+    return {
+        "task": task,
+        "success": result.success,
+        "phases": result.phases,
+        "analyst_output": result.analyst_result.output if result.analyst_result else "",
+        "implementer_output": result.implementer_result.output if result.implementer_result else "",
+        "reviewer_output": result.reviewer_result.output if result.reviewer_result else "",
+        "approvals": [
+            {
+                "id": a.id,
+                "tool": a.tool_name,
+                "risk": a.risk_level.value,
+                "reason": a.reason,
+                "status": a.status.value,
+            }
+            for a in result.approvals
+        ],
+        "final_summary": result.final_summary,
+        "error": result.error,
+        "duration_ms": result.total_duration_ms,
+    }
