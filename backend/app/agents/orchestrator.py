@@ -183,6 +183,17 @@ class Orchestrator:
             result.final_summary = self._synthesize(task, result)
             result.success = True
 
+            # Persist insights to long-term memory
+            try:
+                from app.memory.long_term import extract_and_store_insights
+                await extract_and_store_insights(
+                    task=task,
+                    final_summary=result.final_summary,
+                    files_involved=None,  # Could extract from tool results
+                )
+            except Exception as mem_exc:
+                logger.warning("Failed to store long-term memory: %s", mem_exc)
+
         except Exception as exc:
             logger.exception("ORCHESTRATOR | error: %s", exc)
             result.success = False
