@@ -18,16 +18,16 @@ def test_health_endpoint():
     assert data["version"] == "0.1.0"
 
 
-def test_status_endpoint():
-    """Verify /api/v1/status returns provider info."""
+def test_health_has_provider_info():
+    """Verify /health returns provider and model info."""
     app = create_app()
     client = TestClient(app)
-    resp = client.get("/api/v1/status")
+    resp = client.get("/health")
     assert resp.status_code == 200
     data = resp.json()
     assert "provider" in data
     assert "model" in data
-    assert "workspace" in data
+    assert data["status"] == "ok"
 
 
 def test_config_singleton():

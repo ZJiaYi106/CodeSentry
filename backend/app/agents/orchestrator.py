@@ -124,10 +124,36 @@ class Orchestrator:
 
         logger.info("ORCHESTRATOR | starting task: %s...", task[:100])
 
+        # ── Retrieve long-term memory for context ────────────
+        memory_context = ""
+        try:
+            from app.memory.long_term import search_memories
+
+            fix_results = await search_memories(task, "fix_patterns", n_results=2)
+            convention_results = await search_memories(task, "project_conventions", n_results=2)
+            pref_results = await search_memories(task, "user_preferences", n_results=1)
+
+            parts = []
+            if fix_results:
+                parts.append("Similar past fixes:\n" + "\n".join(f"- {r['content'][:250]}" for r in fix_results))
+            if convention_results:
+                parts.append("Project conventions:\n" + "\n".join(f"- {r['content'][:250]}" for r in convention_results))
+            if pref_results:
+                parts.append("User preferences:\n" + "\n".join(f"- {r['content'][:250]}" for r in pref_results))
+            if parts:
+                memory_context = "\n\nRelevant past experience:\n" + "\n".join(parts)
+                logger.info("ORCHESTRATOR | injected memory: %d fix + %d convention + %d pref",
+                             len(fix_results), len(convention_results), len(pref_results))
+        except Exception as exc:
+            logger.debug("ORCHESTRATOR | memory search skipped: %s", exc)
+
+        # Augment task with memory context for sub-agents
+        augmented_task = task + memory_context
+
         try:
             # Phase 1: ANALYZE
             result.phases.append({"phase": "analyze", "status": "running"})
-            analyst_result = await self.analyst.run(task)
+            analyst_result = await self.analyst.run(augmented_task)
             result.analyst_result = analyst_result
             result.phases[-1]["status"] = "completed"
             result.phases[-1]["output"] = analyst_result.output[:500]
@@ -140,7 +166,7 @@ class Orchestrator:
 
             # Phase 2: IMPLEMENT
             result.phases.append({"phase": "implement", "status": "running"})
-            implementer_result = await self.implementer.run(task)
+            implementer_result = await self.implementer.run(augmented_task)
             result.implementer_result = implementer_result
             result.phases[-1]["status"] = "completed"
             result.phases[-1]["output"] = implementer_result.output[:500]
@@ -160,7 +186,7 @@ class Orchestrator:
 
             # Phase 3: REVIEW
             result.phases.append({"phase": "review", "status": "running"})
-            reviewer_result = await self.reviewer.run(task)
+            reviewer_result = await self.reviewer.run(augmented_task)
             result.reviewer_result = reviewer_result
             result.phases[-1]["status"] = "completed"
             result.phases[-1]["output"] = reviewer_result.output[:500]

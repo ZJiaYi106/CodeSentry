@@ -52,16 +52,16 @@ def create_app() -> FastAPI:
     # Health check
     @app.get("/health")
     async def health():
-        return {"status": "ok", "version": "0.1.0"}
-
-    # Placeholder — real routes added in Phase 6
-    @app.get("/api/v1/status")
-    async def status():
         return {
+            "status": "ok",
+            "version": "0.1.0",
             "provider": settings.model_provider.value,
             "model": settings.model_name,
-            "workspace": str(settings.workspace_root),
         }
+
+    # API routes
+    from app.api.routes import router as api_router
+    app.include_router(api_router)
 
     return app
 

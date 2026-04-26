@@ -76,12 +76,43 @@ async def planner_node(state: dict[str, Any]) -> dict[str, Any]:
 
     Uses the LLM to generate a structured JSON plan.  Falls back to
     pattern-based planning if the LLM is unavailable.
+
+    Before planning, searches long-term memory for relevant past experiences
+    and injects them into the prompt context.
     """
     task = state.get("task", "")
     iteration = state.get("iteration", 0)
     previous_observations = state.get("observations", [])
 
     logger.info("PLANNER | task='%s...' iteration=%d", task[:80], iteration)
+
+    # ── Retrieve long-term memory ──────────────────────────
+    memory_context = ""
+    try:
+        from app.memory.long_term import search_memories
+
+        # Search across all three collections
+        fix_results = await search_memories(task, "fix_patterns", n_results=2)
+        convention_results = await search_memories(task, "project_conventions", n_results=2)
+        pref_results = await search_memories(task, "user_preferences", n_results=1)
+
+        if fix_results or convention_results or pref_results:
+            memory_context = "\n## Relevant Past Experience (from long-term memory)\n"
+            if fix_results:
+                memory_context += "### Similar fixes from past tasks:\n"
+                for r in fix_results:
+                    memory_context += f"- {r['content'][:300]}\n"
+            if convention_results:
+                memory_context += "### Project conventions:\n"
+                for r in convention_results:
+                    memory_context += f"- {r['content'][:300]}\n"
+            if pref_results:
+                memory_context += "### User preferences:\n"
+                for r in pref_results:
+                    memory_context += f"- {r['content'][:300]}\n"
+            logger.info("PLANNER | injected %d memory results", len(fix_results) + len(convention_results) + len(pref_results))
+    except Exception as exc:
+        logger.debug("PLANNER | memory search skipped: %s", exc)
 
     plan_steps: list[dict[str, Any]] = []
 
@@ -96,6 +127,7 @@ async def planner_node(state: dict[str, Any]) -> dict[str, Any]:
 
         prompt = (
             f"{PLANNER_SYSTEM_PROMPT}\n\n"
+            f"{memory_context}"
             f"## User Task\n{task}\n{obs_context}\n\n"
             f"## Available Tools\n"
             f"- list_files: List directory contents (risk: low)\n"
