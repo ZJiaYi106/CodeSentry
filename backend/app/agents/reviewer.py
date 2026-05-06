@@ -1,5 +1,6 @@
 """Reviewer / Test Agent — validates changes and runs tests.
 
+Uses LLM with tool calling to review diffs and execute tests.
 Test execution goes through the Orchestrator's approval gate.
 """
 
@@ -20,69 +21,47 @@ class Reviewer(BaseSubAgent):
     the Orchestrator's approval flow.
     """
 
-    name = "Reviewer"
-    description = (
-        "I review code changes for correctness, style, and safety. "
-        "I also run tests to verify nothing is broken. "
-        "Test execution requires Orchestrator approval."
-    )
+    name = "代码审查者"
+    description = "审查代码变更的正确性、风格和安全性，运行测试验证。测试执行需经编排器批准。"
     allowed_tools = ["read_file", "run_tests", "git_diff"]
 
+    @property
+    def system_prompt(self) -> str:
+        return (
+            "你是 CodeSentry 的代码审查者子智能体。"
+            "你的任务是审查代码变更并运行测试验证一切正常。\n\n"
+            "可用工具：\n"
+            "- git_diff：查看文件变更和差异内容。\n"
+            "- read_file：读取文件内容进行详细审查。\n"
+            "- run_tests：执行测试命令（例如 'pytest'、'python -m pytest tests/'），需要编排器批准。\n\n"
+            "规则（严格遵守）：\n"
+            "1. 始终先用 git_diff 查看变更。\n"
+            "2. 如果 git_diff 为空（没有任何变更）：立即停止并报告「无代码变更——此任务为只读，无需测试。」不要调用任何其他工具。\n"
+            "3. 仅当有实际变更时：用 read_file 审查变更内容，然后调用 run_tests 一次（使用合适的命令如 'pytest' 或 'python -m pytest tests/'）。\n"
+            "4. 同一工具调用失败后绝不重试——报告失败即可。\n"
+            "5. 用中文简洁报告：变更内容、测试结果、发现的问题。"
+        )
+
     async def run(self, task_context: str) -> SubAgentResult:
-        """Review changes and (with approval) run tests."""
+        """Review changes and run tests via LLM."""
         import time
 
         start = time.perf_counter()
 
-        lines: list[str] = []
-        tool_calls: list[dict] = []
-
-        # Step 1: Check git diff for changes
         try:
-            differ = self._registry.get("git_diff")
-            result = await differ.run()
-            tool_calls.append(result.to_dict())
-            if result.success and not result.data.get("empty", True):
-                lines.append("Changes detected — review the diff above")
-                diff_preview = result.data.get("diff", "")[:500]
-                if diff_preview:
-                    lines.append(f"```diff\n{diff_preview}\n```")
-            else:
-                lines.append("No changes to review (clean working tree)")
-        except Exception as exc:
-            lines.append(f"Git diff check failed: {exc}")
-
-        # Step 2: Attempt to run tests (gated by Orchestrator approval)
-        lines.append("")
-        lines.append("## Test Execution")
-        lines.append("Test execution requires Orchestrator approval.")
-        lines.append("The Reviewer would:")
-        lines.append("1. Run the existing test suite to establish baseline")
-        lines.append("2. Verify no regressions after changes")
-        lines.append("3. Report pass/fail counts and any errors")
-
-        try:
-            tester = self._registry.get("run_tests")
-            result = await tester.run(command="pytest -x --tb=short 2>&1 || true", timeout_seconds=30)
-            tool_calls.append(result.to_dict())
-            if result.success:
-                lines.append(f"✅ Tests passed: exit_code={result.data.get('exit_code', '?')}")
-                stdout = result.data.get("stdout", "")
-                if stdout:
-                    lines.append(f"```\n{stdout[:500]}\n```")
-            else:
-                lines.append(f"❌ Tests failed: exit_code={result.data.get('exit_code', '?')}")
-                stderr = result.data.get("stderr", "")
-                if stderr:
-                    lines.append(f"```\n{stderr[:300]}\n```")
-        except Exception as exc:
-            lines.append(f"⚠️  Test execution unavailable: {exc}")
+            output, tool_calls = await self._llm_call(task_context, max_rounds=4)
+            success = True
+        except Exception:
+            output = f"[{self.name}] Review failed — see logs for details."
+            tool_calls = []
+            success = False
 
         duration = (time.perf_counter() - start) * 1000
+
         return SubAgentResult(
             agent_name=self.name,
-            success=True,
-            output="\n".join(lines),
+            success=success,
+            output=output,
             tool_calls=tool_calls,
             duration_ms=duration,
         )

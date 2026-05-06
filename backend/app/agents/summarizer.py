@@ -125,8 +125,23 @@ async def summarizer_node(state: dict[str, Any]) -> dict[str, Any]:
             f"Produce the final markdown report."
         )
 
-        result = await model.ainvoke(prompt)
-        summary = result.content if hasattr(result, "content") else str(result)
+        # ── Prompt Cache ──
+        cached_response = None
+        try:
+            from app.models.cache import get_cached as cache_get, set_cached as cache_set
+            cached_response = await cache_get("summarizer", prompt)
+        except Exception:
+            pass
+
+        if cached_response:
+            summary = cached_response
+        else:
+            result = await model.ainvoke(prompt)
+            summary = result.content if hasattr(result, "content") else str(result)
+            try:
+                await cache_set("summarizer", prompt, summary)
+            except Exception:
+                pass
 
     except Exception as exc:
         logger.warning("LLM summarizer failed, using fallback: %s", exc)

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html style="height:100%;">
+<head>
+<meta charset="UTF-8">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{height:100%;}
+  body{display:flex;flex-direction:column;font-family:Inter,sans-serif;background:#f0f4f8;color:#1e293b;}
+  #root{flex:1;display:flex;flex-direction:column;}
+  .app{flex:1;display:flex;flex-direction:column;padding:2rem;}
+  .header{border-bottom:1px solid #e2e8f0;padding-bottom:1rem;margin-bottom:1.5rem;}
+  .main{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;min-height:0;}
+  .card{background:white;border:1px solid #e2e8f0;border-radius:10px;padding:1.5rem;}
+  textarea{width:100%;min-height:120px;padding:1rem;border:1px solid #e2e8f0;border-radius:6px;font:inherit;}
+  button{background:#3b82f6;color:white;border:none;padding:.6rem 1.5rem;border-radius:6px;cursor:pointer;}
+</style>
+</head>
+<body>
+<div id="root">
+  <div class="app">
+    <header class="header"><h1>CodeSentry</h1></header>
+    <main class="main">
+      <div class="card"><textarea placeholder="Describe your task..."></textarea><button style="margin-top:.75rem">Run Task</button></div>
+      <div class="card"><p style="color:#94a3b8">Timeline will appear here</p></div>
+    </main>
+  </div>
+</div>
+</body>
+</html>

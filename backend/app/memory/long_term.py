@@ -224,14 +224,13 @@ async def extract_and_store_insights(
     # Store as a fix pattern
     task_lower = task.lower()
     if any(kw in task_lower for kw in ("fix", "bug", "error", "issue", "broken")):
+        meta = {"task_type": "bug_fix", "source": "auto_extracted"}
+        if files_involved:
+            meta["files"] = ",".join(files_involved)
         ids.append(await store_memory(
             content=f"Task: {task}\n\nResolution:\n{final_summary[:2000]}",
             collection="fix_patterns",
-            metadata={
-                "task_type": "bug_fix",
-                "files": files_involved or [],
-                "source": "auto_extracted",
-            },
+            metadata=meta,
         ))
 
     # Store project conventions (if any files were involved)
@@ -241,7 +240,17 @@ async def extract_and_store_insights(
             collection="project_conventions",
             metadata={
                 "task_type": "code_change",
-                "files": files_involved,
+                "files": ",".join(files_involved),
+                "source": "auto_extracted",
+            },
+        ))
+    else:
+        # Store even without specific files — general task experience
+        ids.append(await store_memory(
+            content=f"Task: {task}\nSummary: {final_summary[:1000]}",
+            collection="project_conventions",
+            metadata={
+                "task_type": "general",
                 "source": "auto_extracted",
             },
         ))
@@ -262,24 +271,30 @@ async def get_collection_stats() -> dict[str, int]:
     return stats
 
 
-async def clear_collection(collection: str) -> int:
-    """Delete all entries in a collection. Returns count deleted."""
+async def clear_collection(collection: str, clear_fallback: bool = False) -> int:
+    """Delete all entries in a collection. Returns count deleted.
+
+    Args:
+        collection: Which collection to clear.
+        clear_fallback: If True, also clear the in-memory fallback store.
+    """
     count = 0
     try:
         col = _get_or_create_collection(collection)
         count = col.count()
         if count > 0:
-            # Delete all entries by getting all IDs and deleting them
             all_ids = col.get()["ids"]
             if all_ids:
                 col.delete(ids=all_ids)
     except Exception:
         pass
-    # Also clear fallback
-    global _fallback_memory
-    before = len(_fallback_memory)
-    _fallback_memory = [m for m in _fallback_memory if m.collection != collection]
-    count += before - len(_fallback_memory)
+
+    # Only clear fallback when explicitly requested (avoids cross-test contamination)
+    if clear_fallback:
+        global _fallback_memory
+        before = len(_fallback_memory)
+        _fallback_memory = [m for m in _fallback_memory if m.collection != collection]
+        count += before - len(_fallback_memory)
     return count
 
 

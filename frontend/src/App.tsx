@@ -17,13 +17,16 @@ const App: React.FC = () => {
     summary,
     error,
     connected,
+    running,
     startTask,
     resolveApproval,
   } = useSSE();
 
   const [taskId, setTaskId] = React.useState<string | null>(null);
+  const [hasStarted, setHasStarted] = React.useState(false);
 
   const handleStartTask = async (task: string, workspace: string) => {
+    setHasStarted(true);
     const tid = await startTask(task, workspace);
     setTaskId(tid);
   };
@@ -34,6 +37,9 @@ const App: React.FC = () => {
     }
   };
 
+  const isRunning = running || (!!taskId && (connected || events.length > 0));
+  const showResults = hasStarted || isRunning;
+
   return (
     <div className="app">
       <header className="app-header">
@@ -41,36 +47,53 @@ const App: React.FC = () => {
           <span className="logo">&lt;/&gt;</span> CodeSentry
         </h1>
         <span className={`status-badge ${connected ? "connected" : ""}`}>
-          {connected ? "● Connected" : "○ Idle"}
+          {connected ? "● 运行中" : "○ 空闲"}
         </span>
       </header>
 
-      <main className="app-main">
-        <section className="left-panel">
-          <TaskInput onSubmit={handleStartTask} disabled={connected} />
+      {/* Hero input — transitions from centered to inside left panel */}
+      <div className={`app-hero ${showResults ? "hero-compact" : "hero-full"}`}>
+        <div className={`hero-content ${showResults ? "hero-content-hide" : "hero-content-show"}`}>
+          <h2 className="hero-title">你想让 AI 帮你做什么？</h2>
+          <p className="hero-sub">
+            描述你的任务 — AI 智能体将自动探索代码、制定计划并执行。
+          </p>
+          <TaskInput onSubmit={handleStartTask} disabled={isRunning} />
+        </div>
+      </div>
 
-          {plan && <PlanView plan={plan} />}
+      {/* Results — left: input+report, right: timeline */}
+      <div className={`app-results ${showResults ? "results-visible" : "results-hidden"}`}>
+        <main className="app-main">
+          <section className="left-panel">
+            {/* Compact input sits at top of left panel */}
+            <div className="hero-compact-inner">
+              <TaskInput onSubmit={handleStartTask} disabled={isRunning} compact />
+            </div>
 
-          {approvals.length > 0 && (
-            <ApprovalCard
-              approvals={approvals}
-              onResolve={handleResolveApproval}
-              taskId={taskId}
-            />
-          )}
+            {plan && <PlanView plan={plan} />}
 
-          {summary && <FinalSummary summary={summary} error={error} />}
-          {error && !summary && <FinalSummary summary={null} error={error} />}
+            {approvals.length > 0 && (
+              <ApprovalCard
+                approvals={approvals}
+                onResolve={handleResolveApproval}
+                taskId={taskId}
+              />
+            )}
+
+            {summary && <FinalSummary summary={summary} error={error} />}
+            {error && !summary && <FinalSummary summary={null} error={error} />}
+          </section>
+
+          <section className="right-panel">
+            <Timeline events={events} running={isRunning} />
+          </section>
+        </main>
+
+        <section className="bottom-panel">
+          {toolCalls.length > 0 && <ToolCallCard calls={toolCalls} />}
         </section>
-
-        <section className="right-panel">
-          <Timeline events={events} />
-        </section>
-      </main>
-
-      <section className="bottom-panel">
-        {toolCalls.length > 0 && <ToolCallCard calls={toolCalls} />}
-      </section>
+      </div>
     </div>
   );
 };

@@ -1,10 +1,19 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" style="height:100%;">
   <head>
+    <style>
+      html,body{margin:0!important;padding:0!important;height:100%!important;overflow:hidden!important;}
+      body{display:flex!important;flex-direction:column!important;}
+      #root{flex:1!important;display:flex!important;flex-direction:column!important;min-height:0!important;}
+      #root>div{flex:1!important;display:flex!important;flex-direction:column!important;min-height:0!important;}
+    </style>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CodeSentry — AI Coding Agent</title>
+    <title>CodeSentry — AI 编程智能体</title>
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   </head>
   <body>
     <div id="root"></div>

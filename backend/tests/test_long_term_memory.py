@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from app.memory.long_term import (
@@ -39,42 +41,42 @@ class TestMemoryEntry:
 
 class TestFallbackSearch:
     def setup_method(self):
-        _fallback_memory.clear()
+        """Ensure clean state by clearing and re-populating."""
+        import app.memory.long_term as ltm
+        ltm._fallback_memory.clear()
+
+    def _add_entry(self, collection: str, content: str, **meta) -> None:
+        """Add to the module-level _fallback_memory via the module reference."""
+        import app.memory.long_term as ltm
+        ltm._fallback_memory.append(MemoryEntry(
+            collection=collection,
+            content=content,
+            metadata=meta,
+        ))
 
     def test_keyword_match(self):
-        _fallback_memory.append(MemoryEntry(
-            collection="fix_patterns",
-            content="Fixed a NullPointerException by adding null check in login handler",
-            metadata={"task_type": "bug_fix"},
-        ))
-        _fallback_memory.append(MemoryEntry(
-            collection="fix_patterns",
-            content="Refactored database connection pool for performance",
-            metadata={"task_type": "refactor"},
-        ))
+        self._add_entry("fix_patterns",
+            "Fixed a NullPointerException by adding null check in login handler",
+            task_type="bug_fix")
+        self._add_entry("fix_patterns",
+            "Refactored database connection pool for performance",
+            task_type="refactor")
 
         results = _search_fallback("null check login", "fix_patterns", 3)
-        assert len(results) >= 1
+        assert len(results) >= 1, f"Got {len(results)} results, _fallback_memory has {len(_fallback_memory)} entries"
         assert "NullPointerException" in results[0]["content"]
 
     def test_no_match_returns_empty(self):
-        _fallback_memory.append(MemoryEntry(
-            collection="fix_patterns",
-            content="Fixed CSS layout issue",
-        ))
+        self._add_entry("fix_patterns", "Fixed CSS layout issue")
         results = _search_fallback("database connection", "fix_patterns", 3)
         assert len(results) == 0
 
     def test_respects_collection_filter(self):
-        _fallback_memory.append(MemoryEntry(
-            collection="fix_patterns", content="fix login bug",
-        ))
-        _fallback_memory.append(MemoryEntry(
-            collection="user_preferences", content="prefer tabs over spaces",
-        ))
+        self._add_entry("fix_patterns", "fix login bug")
+        self._add_entry("user_preferences", "prefer tabs over spaces")
 
         results = _search_fallback("login", "fix_patterns", 3)
-        assert len(results) >= 1
+        assert len(results) >= 1, f"Got {len(results)} results"
         assert all("login" in r["content"] for r in results)
 
         results = _search_fallback("login", "user_preferences", 3)
@@ -187,7 +189,7 @@ class TestCollectionStats:
         await store_memory(content="Fix A", collection="fix_patterns")
         await store_memory(content="Convention A", collection="project_conventions")
 
-        deleted = await clear_collection("fix_patterns")
+        deleted = await clear_collection("fix_patterns", clear_fallback=True)
         assert deleted >= 1
 
         stats = await get_collection_stats()
@@ -268,7 +270,7 @@ class TestOrchestratorMemoryIntegration:
             "pending_approval_id": None,
         }
 
-        with __import__('unittest').mock.patch("app.agents.planner.get_model", side_effect=RuntimeError("No API key")):
+        with patch("app.agents.planner.get_model", side_effect=RuntimeError("No API key")):
             result = await planner_node(state)
 
         assert len(result["plan"]) >= 3

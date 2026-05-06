@@ -6,9 +6,9 @@ interface Props {
 }
 
 const RISK_COLORS: Record<string, string> = {
-  low: "#059669",
-  medium: "#d97706",
-  high: "#dc2626",
+  low: "#10b981",
+  medium: "#f59e0b",
+  high: "#ef4444",
 };
 
 const ToolCallCard: React.FC<Props> = ({ calls }) => {
@@ -16,7 +16,7 @@ const ToolCallCard: React.FC<Props> = ({ calls }) => {
 
   return (
     <div className="tool-calls">
-      <h3>Tool Calls ({calls.length})</h3>
+      <h3>工具调用（{calls.length}）</h3>
       <div className="tool-call-grid">
         {calls.map((call, i) => (
           <div key={call.id || i} className="tool-call-item">

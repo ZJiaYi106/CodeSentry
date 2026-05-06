@@ -20,7 +20,7 @@ const PlanView: React.FC<Props> = ({ plan }) => {
 
   return (
     <div className="plan-view">
-      <h3>Execution Plan</h3>
+      <h3>执行计划</h3>
       <div className="plan-steps">
         {steps.map((step) => (
           <div key={step.id} className={`plan-step plan-step-${step.status}`}>

@@ -1,5 +1,6 @@
 """Implementer — restricted write sub-agent for code modifications.
 
+Uses LLM with tool calling to understand code and propose changes.
 ALL writes go through the Orchestrator's approval gate.
 """
 
@@ -16,65 +17,51 @@ class Implementer(BaseSubAgent):
       - write_patch: propose/modify files (REQUIRES Orchestrator approval)
 
     The Implementer CANNOT directly execute write_patch — it must go through
-    the Orchestrator's approval flow.  In the fallback mode, it describes
-    what changes it WOULD make.
+    the Orchestrator's approval flow.
     """
 
-    name = "Implementer"
-    description = (
-        "I implement code changes based on the task requirements and "
-        "the analysis provided by the Repository Analyst. "
-        "All my writes must be approved by the Orchestrator."
-    )
+    name = "代码实现者"
+    description = "根据任务需求和仓库分析师的分析结果实现代码变更，所有写入操作需经编排器批准。"
     allowed_tools = ["read_file", "write_patch"]
 
+    @property
+    def system_prompt(self) -> str:
+        return (
+            "你是 CodeSentry 的代码实现者子智能体。"
+            "你的任务是根据用户需求进行代码修改。\n\n"
+            "可用工具：\n"
+            "- read_file：读取文件内容。先用它理解需要修改的代码。\n"
+            "- write_patch：将新内容写入文件（会先创建备份）。这是唯一修改文件的方式。\n\n"
+            "规则：\n"
+            "1. 先用 read_file 理解需要变更的文件。\n"
+            "2. 思考需要什么变更，先用中文解释你的方案。\n"
+            "3. 用 write_patch 逐个应用变更。提供完整的文件新内容，不要只给 diff。\n"
+            "4. 精准修改——只改完成任务必需的部分。\n"
+            "5. 修改完成后用中文总结你改了什么以及为什么。\n"
+            "6. 如果任务是只读的（只是查询信息），说明无需修改并提供相关信息。\n\n"
+            "⚠️ 注意：write_patch 需要编排器批准后才会真正生效。"
+        )
+
     async def run(self, task_context: str) -> SubAgentResult:
-        """Propose and (with approval) implement changes."""
+        """Propose and (with approval) implement changes via LLM."""
         import time
 
         start = time.perf_counter()
 
-        lines: list[str] = []
-        tool_calls: list[dict] = []
-
-        # The Implementer first reads relevant files to understand context,
-        # then proposes changes.  Write operations are gated by the Orchestrator.
-
-        # Extract potential file paths from the task context
-        import re
-        file_pattern = re.compile(r'["\']?([\w./-]+\.(?:py|js|ts|tsx|jsx|go|rs|java))["\']?')
-        mentioned_files = file_pattern.findall(task_context)
-
-        # Read mentioned files to gather context
-        for fpath in mentioned_files[:3]:  # Max 3 files
-            try:
-                reader = self._registry.get("read_file")
-                result = await reader.run(file_path=fpath, limit=50)
-                tool_calls.append(result.to_dict())
-                if result.success:
-                    lines.append(f"Read {fpath}: {result.data.get('total_lines', '?')} lines")
-                    lines.append(f"  Content preview: {result.data.get('content', '')[:200]}")
-            except Exception as exc:
-                lines.append(f"Could not read {fpath}: {exc}")
-
-        # Describe proposed changes (in full impl this would be LLM-generated)
-        lines.append("")
-        lines.append("## Proposed Changes")
-        lines.append(f"Task: {task_context[:300]}")
-        lines.append("")
-        lines.append("The Implementer would:")
-        lines.append("1. Read the target files to understand current implementation")
-        lines.append("2. Generate a unified diff patch with the proposed changes")
-        lines.append("3. Submit the patch for Orchestrator approval")
-        lines.append("4. Apply the patch only after approval is granted")
-        lines.append("")
-        lines.append("⚠️  WRITE OPERATIONS REQUIRE ORCHESTRATOR APPROVAL ⚠️")
+        try:
+            output, tool_calls = await self._llm_call(task_context)
+            success = True
+        except Exception:
+            output = f"[{self.name}] Implementation failed — see logs for details."
+            tool_calls = []
+            success = False
 
         duration = (time.perf_counter() - start) * 1000
+
         return SubAgentResult(
             agent_name=self.name,
-            success=True,
-            output="\n".join(lines),
+            success=success,
+            output=output,
             tool_calls=tool_calls,
             duration_ms=duration,
         )

@@ -47,6 +47,36 @@ class AuditRecord(Base):
         return f"<AuditRecord {self.event_id} {self.event_type} {self.tool_name}>"
 
 
+# ── DB persistence ────────────────────────────────────────
+
+async def _persist_to_db(event: dict[str, Any]) -> None:
+    """Try to persist an audit event to PostgreSQL. Silently no-op on failure."""
+    try:
+        from app.db import get_engine
+        from sqlalchemy import insert
+
+        engine = await get_engine()
+        # Using raw insert to avoid session management complexity in background tasks
+        async with engine.begin() as conn:
+            await conn.execute(
+                insert(AuditRecord).values(
+                    event_id=event["event_id"],
+                    event_type=event["event_type"],
+                    agent=event.get("agent"),
+                    tool_name=event.get("tool_name"),
+                    risk_level=event.get("risk_level"),
+                    parameters=event.get("parameters"),
+                    output_summary=event.get("output_summary"),
+                    duration_ms=event.get("duration_ms"),
+                    success=event.get("success"),
+                    extra=event.get("extra"),
+                )
+            )
+        logger.debug("AUDIT DB | persisted event %s", event["event_id"])
+    except Exception as exc:
+        logger.debug("AUDIT DB | persistence skipped (DB unavailable): %s", exc)
+
+
 # ── In-memory fallback for when DB is not available ───────
 
 _in_memory_log: list[dict[str, Any]] = []
@@ -82,6 +112,15 @@ def log_event(
         "extra": extra,
     }
     _in_memory_log.append(event)
+
+    # Fire-and-forget DB persistence (don't block the agent loop)
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_persist_to_db(event))
+    except RuntimeError:
+        pass
 
     logger.info(
         "AUDIT | %s | tool=%s risk=%s success=%s duration=%.1fms",

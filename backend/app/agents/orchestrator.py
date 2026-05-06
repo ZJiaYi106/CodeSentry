@@ -164,9 +164,15 @@ class Orchestrator:
             )
             logger.info("ORCHESTRATOR | analyze complete (%d ms)", analyst_result.duration_ms)
 
-            # Phase 2: IMPLEMENT
+            # Build context for downstream agents: task + analyst findings
+            analyst_context = (
+                f"{augmented_task}\n\n"
+                f"=== 仓库分析师发现 ===\n{analyst_result.output[:1500]}"
+            )
+
+            # Phase 2: IMPLEMENT — receives analyst context
             result.phases.append({"phase": "implement", "status": "running"})
-            implementer_result = await self.implementer.run(augmented_task)
+            implementer_result = await self.implementer.run(analyst_context)
             result.implementer_result = implementer_result
             result.phases[-1]["status"] = "completed"
             result.phases[-1]["output"] = implementer_result.output[:500]
@@ -184,9 +190,16 @@ class Orchestrator:
             )
             logger.info("ORCHESTRATOR | implement complete (%d ms)", implementer_result.duration_ms)
 
-            # Phase 3: REVIEW
+            # Build reviewer context: task + analyst findings + implementer result
+            reviewer_context = (
+                f"{augmented_task}\n\n"
+                f"=== 仓库分析师发现 ===\n{analyst_result.output[:1000]}\n\n"
+                f"=== 实现者操作 ===\n{implementer_result.output[:800]}"
+            )
+
+            # Phase 3: REVIEW — receives full context
             result.phases.append({"phase": "review", "status": "running"})
-            reviewer_result = await self.reviewer.run(augmented_task)
+            reviewer_result = await self.reviewer.run(reviewer_context)
             result.reviewer_result = reviewer_result
             result.phases[-1]["status"] = "completed"
             result.phases[-1]["output"] = reviewer_result.output[:500]
@@ -240,43 +253,60 @@ class Orchestrator:
         return result
 
     def _synthesize(self, task: str, result: OrchestratorResult) -> str:
-        """Combine sub-agent outputs into a final summary."""
-        parts = [
-            f"# CodeSentry Report",
-            f"",
-            f"## Task",
-            f"{task}",
-            f"",
-            f"## Repository Analysis",
-        ]
+        """Combine sub-agent outputs into a final summary.
 
+        Smart synthesis: only show sections that add value.
+        - Analyst report is always the main content.
+        - Implementer only shown if it actually made changes.
+        - Reviewer only shown if it ran tests or found issues.
+        """
+        parts = [f"# CodeSentry 报告", "", f"## 任务", f"{task}"]
+
+        # ── Main analysis (always show) ──────────────────
         if result.analyst_result:
-            parts.append(result.analyst_result.output[:800])
+            parts.extend(["", result.analyst_result.output[:2000]])
 
-        parts.extend(["", "## Implementation"])
-
+        # ── Check if Implementer actually did something ──
+        impl_has_changes = False
         if result.implementer_result:
-            parts.append(result.implementer_result.output[:800])
+            for tc in result.implementer_result.tool_calls:
+                if tc.get("tool") == "write_patch" and tc.get("success"):
+                    impl_has_changes = True
+                    break
 
-        parts.extend(["", "## Review & Tests"])
+        if impl_has_changes:
+            parts.extend(["", "## 代码变更", result.implementer_result.output[:1000]])
 
+        # ── Check if Reviewer actually did something ─────
+        rev_has_tests = False
         if result.reviewer_result:
-            parts.append(result.reviewer_result.output[:800])
+            for tc in result.reviewer_result.tool_calls:
+                if tc.get("tool") == "run_tests":
+                    rev_has_tests = True
+                    break
+            # Also show if there are actual changes to review
+            if impl_has_changes and not rev_has_tests:
+                parts.extend(["", "## 审查", result.reviewer_result.output[:600]])
 
+        if rev_has_tests:
+            parts.extend(["", "## 测试结果", result.reviewer_result.output[:1000]])
+
+        # ── Approvals ────────────────────────────────────
         if self.approvals:
-            parts.extend(["", "## Pending Approvals"])
+            parts.extend(["", "## 待审批"])
             for apr in self.approvals:
                 parts.append(
                     f"- [{apr.risk_level.value.upper()}] `{apr.tool_name}` — {apr.reason} "
-                    f"(status: {apr.status.value})"
+                    f"(状态: {apr.status.value})"
                 )
 
+        # ── Stats ────────────────────────────────────────
         parts.extend([
             "",
-            "## Summary",
-            f"- Phases completed: {sum(1 for p in result.phases if p['status']=='completed')}/{len(result.phases)}",
-            f"- Total approvals required: {len(self.approvals)}",
-            f"- Total duration: {result.total_duration_ms:.0f}ms",
+            "---",
+            f"阶段: {sum(1 for p in result.phases if p['status']=='completed')}/{len(result.phases)} 完成"
+            f" | 耗时: {result.total_duration_ms:.0f}ms"
+            f" | 审批: {len(self.approvals)} 项",
         ])
 
         return "\n".join(parts)

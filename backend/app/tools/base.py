@@ -79,12 +79,10 @@ class BaseTool(ABC):
         """
         import os
 
-        # If path is absolute, join with workspace root's drive/root
+        # Resolve path: if absolute, use as-is (validate containment below);
+        # if relative, join with workspace_root.
         if os.path.isabs(path):
-            # On Unix: /foo → /workspace/foo  (strip leading /)
-            # On Windows: C:\foo → workspace\foo (strip drive)
-            rel = path.lstrip(os.sep).replace(":", "")
-            full = os.path.normpath(os.path.join(self.workspace_root, rel))
+            full = os.path.normpath(path)
         else:
             full = os.path.normpath(os.path.join(self.workspace_root, path))
 

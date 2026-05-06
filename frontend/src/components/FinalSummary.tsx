@@ -10,10 +10,10 @@ const FinalSummary: React.FC<Props> = ({ summary, error }) => {
 
   return (
     <div className="final-summary">
-      <h3>Final Report</h3>
+      <h3>最终报告</h3>
       {error && (
         <div className="error-banner">
-          <strong>Error:</strong> {error}
+          <strong>错误：</strong> {error}
         </div>
       )}
       {summary && (

@@ -145,8 +145,26 @@ async def planner_node(state: dict[str, Any]) -> dict[str, Any]:
             f"Output ONLY the JSON array, no other text."
         )
 
-        result = await model.ainvoke(prompt)
-        content = result.content if hasattr(result, "content") else str(result)
+        # ── Prompt Cache: try cache before calling LLM ──
+        cached_response = None
+        try:
+            from app.models.cache import get_cached as cache_get, set_cached as cache_set
+            cached_response = await cache_get("planner", prompt)
+        except Exception:
+            pass
+
+        if cached_response:
+            logger.info("PLANNER | cache HIT — using cached response")
+            content = cached_response
+        else:
+            result = await model.ainvoke(prompt)
+            content = result.content if hasattr(result, "content") else str(result)
+            # Store in cache for future
+            try:
+                from app.models.cache import set_cached as cache_set
+                await cache_set("planner", prompt, content)
+            except Exception:
+                pass
 
         # Extract JSON from the response
         json_match = re.search(r"\[.*\]", content, re.DOTALL)

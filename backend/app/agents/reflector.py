@@ -85,8 +85,23 @@ async def reflector_node(state: dict[str, Any]) -> dict[str, Any]:
             f"Output JSON with action (continue/replan/finish) and reason."
         )
 
-        result = await model.ainvoke(prompt)
-        content = result.content if hasattr(result, "content") else str(result)
+        # ── Prompt Cache ──
+        cached_response = None
+        try:
+            from app.models.cache import get_cached as cache_get, set_cached as cache_set
+            cached_response = await cache_get("reflector", prompt)
+        except Exception:
+            pass
+
+        if cached_response:
+            content = cached_response
+        else:
+            result = await model.ainvoke(prompt)
+            content = result.content if hasattr(result, "content") else str(result)
+            try:
+                await cache_set("reflector", prompt, content)
+            except Exception:
+                pass
 
         # Extract JSON
         json_match = re.search(r"\{[^}]*\}", content, re.DOTALL)

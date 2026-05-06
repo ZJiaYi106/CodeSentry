@@ -15,7 +15,7 @@ const ApprovalCard: React.FC<Props> = ({ approvals, onResolve, taskId }) => {
 
   return (
     <div className="approvals">
-      <h3>Approvals</h3>
+      <h3>待审批</h3>
 
       {pending.length > 0 && (
         <div className="approval-pending">
@@ -35,14 +35,14 @@ const ApprovalCard: React.FC<Props> = ({ approvals, onResolve, taskId }) => {
                   onClick={() => onResolve(apr.id, "approve")}
                   disabled={!taskId}
                 >
-                  Approve
+                  批准
                 </button>
                 <button
                   className="btn-reject"
                   onClick={() => onResolve(apr.id, "reject")}
                   disabled={!taskId}
                 >
-                  Reject
+                  拒绝
                 </button>
               </div>
             </div>
@@ -56,7 +56,7 @@ const ApprovalCard: React.FC<Props> = ({ approvals, onResolve, taskId }) => {
             <div key={apr.id} className={`approval-item approval-${apr.status}`}>
               <span className="approval-resolved-label">
                 {apr.status === "approved" ? "✅" : "❌"}{" "}
-                {apr.tool} — {apr.status}
+                {apr.tool} — {apr.status === "approved" ? "已批准" : apr.status === "rejected" ? "已拒绝" : apr.status}
               </span>
             </div>
           ))}

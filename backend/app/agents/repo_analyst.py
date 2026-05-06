@@ -1,4 +1,8 @@
-"""Repository Analyst — read-only sub-agent for code exploration."""
+"""Repository Analyst — read-only sub-agent for code exploration.
+
+Uses LLM with tool calling to dynamically explore the repository
+based on the task at hand.
+"""
 
 from __future__ import annotations
 
@@ -15,69 +19,48 @@ class RepoAnalyst(BaseSubAgent):
       - git_diff: see current changes
     """
 
-    name = "Repository Analyst"
-    description = (
-        "I explore code repositories to understand their structure, "
-        "identify relevant files, and gather context for the task at hand."
-    )
+    name = "仓库分析师"
+    description = "探索代码仓库结构，识别相关文件，收集任务所需的上下文。"
     allowed_tools = ["list_files", "search_code", "read_file", "git_diff"]
 
+    @property
+    def system_prompt(self) -> str:
+        return (
+            "你是 CodeSentry 的仓库分析师子智能体。"
+            "你的任务是探索代码库，收集完成用户任务所需的所有相关信息。\n\n"
+            "可用工具：\n"
+            "- list_files：列出目录中的文件和文件夹。首先使用此工具了解项目结构。\n"
+            "- search_code：在代码文件中搜索正则表达式。用于查找相关函数、类或模式。\n"
+            "- read_file：读取指定文件的内容。用于检查通过 list_files 或 search_code 找到的文件。\n"
+            "- git_diff：查看仓库中当前未提交的变更。\n\n"
+            "规则：\n"
+            "1. 先用 list_files 了解整体结构。\n"
+            "2. 用 search_code 定位相关代码。\n"
+            "3. 用 read_file 获取关键文件的完整上下文。\n"
+            "4. 要全面但聚焦——只读取与任务相关的文件。\n"
+            "5. 收集足够信息后，用中文提供清晰、结构化的发现总结，包含文件路径和相关代码摘要。\n"
+            "6. 不要修改或建议修改代码——你只负责分析。"
+        )
+
     async def run(self, task_context: str) -> SubAgentResult:
-        """Explore the repo and gather relevant context."""
+        """Explore the repo using LLM-driven tool calling."""
         import time
 
         start = time.perf_counter()
 
-        findings: list[str] = []
-        tool_calls: list[dict] = []
-
-        # Step 1: List top-level files
         try:
-            lister = self._registry.get("list_files")
-            result = await lister.run(path=".", recursive=False)
-            tool_calls.append(result.to_dict())
-            if result.success and result.data:
-                entries = result.data.get("entries", [])
-                py_files = [e for e in entries if e.get("type") == "file" and e["path"].endswith(".py")]
-                dirs = [e for e in entries if e.get("type") == "dir"]
-                findings.append(
-                    f"Repository structure: {len(entries)} entries "
-                    f"({len(py_files)} Python files, {len(dirs)} directories)"
-                )
-                for f in py_files[:5]:
-                    findings.append(f"  Found: {f['path']}")
-        except Exception as exc:
-            findings.append(f"Error listing files: {exc}")
-
-        # Step 2: Search for TODO/FIXME markers
-        try:
-            searcher = self._registry.get("search_code")
-            result = await searcher.run(pattern=r"TODO|FIXME|HACK|XXX", path=".", max_results=10)
-            tool_calls.append(result.to_dict())
-            if result.success and result.data:
-                count = result.data.get("match_count", 0)
-                findings.append(f"Found {count} TODO/FIXME markers in codebase")
-        except Exception as exc:
-            findings.append(f"Error searching code: {exc}")
-
-        # Step 3: Check git diff
-        try:
-            differ = self._registry.get("git_diff")
-            result = await differ.run()
-            tool_calls.append(result.to_dict())
-            if result.success and result.data and not result.data.get("empty", True):
-                findings.append("Uncommitted changes detected in repository")
-            else:
-                findings.append("No uncommitted changes (clean working tree or not a git repo)")
-        except Exception as exc:
-            findings.append(f"Error checking git diff: {exc}")
+            output, tool_calls = await self._llm_call(task_context)
+            success = True
+        except Exception:
+            output = f"[{self.name}] Analysis failed — see logs for details."
+            tool_calls = []
+            success = False
 
         duration = (time.perf_counter() - start) * 1000
-        output = "\n".join(findings)
 
         return SubAgentResult(
             agent_name=self.name,
-            success=True,
+            success=success,
             output=output,
             tool_calls=tool_calls,
             duration_ms=duration,
