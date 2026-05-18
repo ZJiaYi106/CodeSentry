@@ -30,12 +30,21 @@ def _cache_key(prefix: str, content: str) -> str:
 
 
 async def _get_redis():
-    """Return a Redis connection, or None if unavailable."""
+    """Return a Redis connection, or None if unavailable.
+
+    Connection timeout is set to 2 seconds so DNS / network failures
+    don't add long delays to every cache operation.
+    """
     try:
         import redis.asyncio as aioredis
 
         settings = get_settings()
-        return aioredis.from_url(settings.redis_dsn, decode_responses=True)
+        return aioredis.from_url(
+            settings.redis_dsn,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
     except Exception:
         return None
 

@@ -136,7 +136,12 @@ async def summarizer_node(state: dict[str, Any]) -> dict[str, Any]:
         if cached_response:
             summary = cached_response
         else:
-            result = await model.ainvoke(prompt)
+            import asyncio as _asyncio
+            try:
+                result = await _asyncio.wait_for(model.ainvoke(prompt), timeout=90)
+            except _asyncio.TimeoutError:
+                logger.warning("SUMMARIZER | LLM call timed out, using fallback")
+                raise
             summary = result.content if hasattr(result, "content") else str(result)
             try:
                 await cache_set("summarizer", prompt, summary)

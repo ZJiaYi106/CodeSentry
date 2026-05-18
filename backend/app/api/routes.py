@@ -29,6 +29,11 @@ router = APIRouter(prefix="/api/v1", tags=["tasks"])
 # In-memory task store (replaced by DB in production)
 _tasks: dict[str, dict[str, Any]] = {}
 _approvals: dict[str, dict[str, Any]] = {}
+_task_refs: dict[str, asyncio.Task] = {}  # Track background tasks for cancellation
+
+# Timeouts (seconds)
+TASK_EXECUTION_TIMEOUT = 300  # 5 minutes max for a single task
+SSE_MAX_POLL_SECONDS = 360    # 6 minutes max for SSE connection
 
 
 # ── Helpers ────────────────────────────────────────────────
@@ -38,7 +43,10 @@ def _task_id() -> str:
 
 
 async def _run_task_and_stream(task_id: str, req: TaskRequest) -> None:
-    """Execute a task and push SSE events into the task's event queue."""
+    """Execute a task and push SSE events into the task's event queue.
+
+    Wrapped in asyncio.wait_for to enforce a hard timeout.
+    """
     events: list[dict[str, Any]] = _tasks[task_id].setdefault("events", [])
     approval_queue: list[dict[str, Any]] = _tasks[task_id].setdefault("pending_approvals", [])
 
@@ -50,7 +58,8 @@ async def _run_task_and_stream(task_id: str, req: TaskRequest) -> None:
         }
         events.append(event)
 
-    try:
+    async def _execute() -> None:
+        """Inner coroutine — the actual task logic."""
         _emit("progress", {"message": "Starting task...", "percent": 5})
 
         settings = get_settings()
@@ -122,11 +131,22 @@ async def _run_task_and_stream(task_id: str, req: TaskRequest) -> None:
         _emit("progress", {"message": "Task complete", "percent": 100})
         _emit("done", {"task_id": task_id})
 
+    try:
+        await asyncio.wait_for(_execute(), timeout=TASK_EXECUTION_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.error("Task %s timed out after %ds", task_id, TASK_EXECUTION_TIMEOUT)
+        _emit("error", {"message": f"Task timed out after {TASK_EXECUTION_TIMEOUT}s"})
+        _tasks[task_id]["status"] = "failed"
+        _tasks[task_id]["error"] = f"Timeout after {TASK_EXECUTION_TIMEOUT}s"
+        _emit("done", {"task_id": task_id})
     except Exception as exc:
         logger.exception("Task %s failed", task_id)
         _emit("error", {"message": str(exc)})
         _tasks[task_id]["status"] = "failed"
         _tasks[task_id]["error"] = str(exc)
+        _emit("done", {"task_id": task_id})
+    finally:
+        _task_refs.pop(task_id, None)
 
 
 # ── Routes ─────────────────────────────────────────────────
@@ -144,8 +164,27 @@ async def create_task(req: TaskRequest) -> dict[str, Any]:
         "pending_approvals": [],
     }
 
-    # Launch in background
-    asyncio.create_task(_run_task_and_stream(task_id, req))
+    # Launch in background, track the task for lifecycle management
+    bg_task = asyncio.create_task(_run_task_and_stream(task_id, req))
+    _task_refs[task_id] = bg_task
+
+    def _on_done(t: asyncio.Task) -> None:
+        """Callback: catch unhandled exceptions in the background task."""
+        try:
+            t.result()
+        except asyncio.CancelledError:
+            logger.warning("Task %s was cancelled", task_id)
+        except Exception as exc:
+            logger.exception("Task %s raised unhandled exception: %s", task_id, exc)
+            _tasks[task_id].setdefault("events", []).append({
+                "type": "error",
+                "data": {"message": f"Unhandled error: {exc}"},
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            _tasks[task_id]["status"] = "failed"
+            _tasks[task_id]["error"] = str(exc)
+
+    bg_task.add_done_callback(_on_done)
 
     return {
         "task_id": task_id,
@@ -162,13 +201,29 @@ async def create_task(req: TaskRequest) -> dict[str, Any]:
 
 @router.get("/tasks/{task_id}/stream")
 async def stream_task(task_id: str):
-    """SSE endpoint — stream task progress events to the frontend."""
+    """SSE endpoint — stream task progress events to the frontend.
+
+    Has a maximum poll duration; emits a timeout error if the task
+    doesn't complete within SSE_MAX_POLL_SECONDS.
+    """
     if task_id not in _tasks:
         raise HTTPException(status_code=404, detail="Task not found")
 
     async def event_generator():
+        start_time = datetime.now(timezone.utc)
         sent_count = 0
         while True:
+            elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+            if elapsed > SSE_MAX_POLL_SECONDS:
+                yield {
+                    "event": "error",
+                    "data": json.dumps(
+                        {"message": f"Task monitoring timed out after {SSE_MAX_POLL_SECONDS}s"},
+                        ensure_ascii=False,
+                    ),
+                }
+                break
+
             events: list[dict] = _tasks[task_id].get("events", [])
             # Send new events
             while sent_count < len(events):
@@ -182,7 +237,6 @@ async def stream_task(task_id: str):
             # Check if task is done
             status = _tasks[task_id].get("status")
             if status in ("completed", "failed"):
-                # Send final event if not yet sent
                 if sent_count <= len(events):
                     yield {
                         "event": "done" if status == "completed" else "error",

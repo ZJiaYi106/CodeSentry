@@ -3,6 +3,10 @@ import type { SSEEvent, TimelineEvent, ApprovalRequest, ToolCall } from "../type
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
+// Idle timeout: if no SSE event arrives within this window, treat the
+// connection as dead and stop showing "running".
+const SSE_IDLE_TIMEOUT_MS = 60_000; // 60 seconds
+
 const AGENT_CN: Record<string, string> = {
   planner: "规划者",
   tool_executor: "工具执行",
@@ -88,6 +92,22 @@ export function useSSE(): UseSSEReturn {
       const decoder = new TextDecoder();
       let buffer = "";
 
+      // ── Idle timeout: reset on every event, fire if silent too long ──
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const resetIdleTimer = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          setError("SSE 流超时：60 秒内未收到新事件，连接可能已断开");
+          setConnected(false);
+          setRunning(false);
+          readerRef.current?.cancel();
+        }, SSE_IDLE_TIMEOUT_MS);
+      };
+
+      // Start the idle timer — first event should arrive soon
+      resetIdleTimer();
+
       const readLoop = async () => {
         try {
           while (true) {
@@ -107,6 +127,7 @@ export function useSSE(): UseSSEReturn {
                 try {
                   const parsed = JSON.parse(raw);
                   processSSEEvent(currentEvent, parsed);
+                  resetIdleTimer(); // received an event — reset idle countdown
                 } catch {
                   // skip malformed
                 }
@@ -117,6 +138,8 @@ export function useSSE(): UseSSEReturn {
           if ((err as Error).name !== "AbortError") {
             setError((err as Error).message);
           }
+        } finally {
+          if (idleTimer) clearTimeout(idleTimer);
         }
         setConnected(false);
         setRunning(false);
@@ -198,6 +221,8 @@ export function useSSE(): UseSSEReturn {
     return () => {
       readerRef.current?.cancel();
       abortRef.current?.abort();
+      setConnected(false);
+      setRunning(false);
     };
   }, []);
 

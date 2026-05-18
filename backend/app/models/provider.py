@@ -32,6 +32,8 @@ def _create_openai_model() -> BaseChatModel:
         api_key=settings.model_api_key,
         temperature=settings.agent_temperature,
         max_tokens=4096,
+        request_timeout=120,
+        max_retries=2,
     )
 
 
@@ -46,6 +48,8 @@ def _create_anthropic_model() -> BaseChatModel:
         api_key=settings.model_api_key,
         temperature=settings.agent_temperature,
         max_tokens=4096,
+        request_timeout=120,
+        max_retries=2,
     )
 
 
@@ -60,6 +64,8 @@ def _create_hermes_model() -> BaseChatModel:
         api_key=settings.model_api_key or "not-needed",
         temperature=settings.agent_temperature,
         max_tokens=4096,
+        request_timeout=120,
+        max_retries=2,
     )
 
 

@@ -79,9 +79,16 @@ class BaseSubAgent:
         This two-step pattern ensures the LLM converges to a text answer
         instead of looping on tool calls forever.
 
+        Each individual LLM call has a 90-second asyncio hard deadline
+        (in addition to the 120-second HTTP-level request_timeout on the model).
+
         Returns (final_text_output, tool_call_records).
         """
+        import asyncio
+
         from app.models.provider import get_model
+
+        LLM_CALL_TIMEOUT = 90  # seconds per individual LLM invocation
 
         model = get_model()
 
@@ -113,7 +120,16 @@ class BaseSubAgent:
 
             try:
                 model_with_tools = model.bind_tools(tool_schemas)
-                response = await model_with_tools.ainvoke(conversation)
+                response = await asyncio.wait_for(
+                    model_with_tools.ainvoke(conversation),
+                    timeout=LLM_CALL_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error("%s | LLM call timed out in round %d", self.name, round_num + 1)
+                return (
+                    f"[{self.name}] LLM call timed out after {LLM_CALL_TIMEOUT}s",
+                    tool_calls_record,
+                )
             except Exception as exc:
                 logger.error("%s | LLM call failed in round %d: %s", self.name, round_num, exc)
                 return (
@@ -169,7 +185,16 @@ class BaseSubAgent:
             ))
 
             try:
-                final_response = await model.ainvoke(conversation)
+                final_response = await asyncio.wait_for(
+                    model.ainvoke(conversation),
+                    timeout=LLM_CALL_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error("%s | text-only call timed out in round %d", self.name, round_num + 1)
+                return (
+                    f"[{self.name}] Text response timed out after {LLM_CALL_TIMEOUT}s",
+                    tool_calls_record,
+                )
             except Exception as exc:
                 logger.error("%s | text-only call failed: %s", self.name, exc)
                 return (

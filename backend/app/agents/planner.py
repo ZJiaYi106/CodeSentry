@@ -157,7 +157,12 @@ async def planner_node(state: dict[str, Any]) -> dict[str, Any]:
             logger.info("PLANNER | cache HIT — using cached response")
             content = cached_response
         else:
-            result = await model.ainvoke(prompt)
+            import asyncio as _asyncio
+            try:
+                result = await _asyncio.wait_for(model.ainvoke(prompt), timeout=90)
+            except _asyncio.TimeoutError:
+                logger.warning("PLANNER | LLM call timed out, using fallback")
+                raise
             content = result.content if hasattr(result, "content") else str(result)
             # Store in cache for future
             try:
