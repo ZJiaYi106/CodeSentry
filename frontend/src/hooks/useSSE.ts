@@ -1,30 +1,14 @@
 import { useEffect, useRef, useCallback, useState } from "react";
-import type { SSEEvent, TimelineEvent, ApprovalRequest, ToolCall } from "../types";
+import type { TimelineEvent, ApprovalRequest, ToolCall } from "../types";
+import { describeToolCall } from "../lib/describe";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 // Idle timeout: if no SSE event arrives within this window, treat the
-// connection as dead and stop showing "running".
-const SSE_IDLE_TIMEOUT_MS = 60_000; // 60 seconds
-
-const AGENT_CN: Record<string, string> = {
-  planner: "规划者",
-  tool_executor: "工具执行",
-  observer: "观察者",
-  reflector: "反思者",
-  summarizer: "总结者",
-  orchestrator: "编排器",
-  system: "系统",
-};
-
-const TYPE_CN: Record<string, string> = {
-  plan: "制定计划",
-  tool_call: "工具调用",
-  observation: "观察记录",
-  reflection: "反思评估",
-  approval: "等待审批",
-  summary: "任务完成",
-};
+// connection as dead and stop showing "running". Kept above the backend's
+// LLM call timeout (90s) and below its liveness ping interval (20s), so
+// missed heartbeats still get several chances before we give up.
+const SSE_IDLE_TIMEOUT_MS = 90_000; // 90 seconds
 
 interface UseSSEReturn {
   events: TimelineEvent[];
@@ -35,7 +19,7 @@ interface UseSSEReturn {
   error: string | null;
   connected: boolean;
   running: boolean;
-  startTask: (task: string, workspace?: string) => Promise<string>;
+  startTask: (task: string, workspace?: string, followupOf?: string) => Promise<string>;
   resolveApproval: (taskId: string, approvalId: string, action: "approve" | "reject") => Promise<void>;
 }
 
@@ -48,7 +32,6 @@ export function useSSE(): UseSSEReturn {
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [running, setRunning] = useState(false);
-  const [taskId, setTaskId] = useState<string | null>(null);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -57,7 +40,7 @@ export function useSSE(): UseSSEReturn {
   }, []);
 
   const startTask = useCallback(
-    async (task: string, workspace = "/workspace"): Promise<string> => {
+    async (task: string, workspace = "/workspace", followupOf?: string): Promise<string> => {
       setEvents([]);
       setPlan(null);
       setToolCalls([]);
@@ -69,11 +52,14 @@ export function useSSE(): UseSSEReturn {
       const res = await fetch(`${API_BASE}/api/v1/tasks`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task, workspace_root: workspace }),
+        body: JSON.stringify({
+          task,
+          workspace_root: workspace,
+          ...(followupOf ? { followup_of: followupOf } : {}),
+        }),
       });
       const data = await res.json();
       const tid = data.task_id;
-      setTaskId(tid);
       setConnected(true);
 
       abortRef.current = new AbortController();
@@ -156,6 +142,10 @@ export function useSSE(): UseSSEReturn {
       const ts = new Date().toISOString();
 
       switch (eventType) {
+        case "ping":
+          // Liveness heartbeat from the backend — no UI action, just resets
+          // the idle timer (done in the read loop for every event).
+          break;
         case "plan": {
           const steps = (data.steps as unknown[])?.length || 0;
           setPlan({ id: ts, type: "plan", content: JSON.stringify(data), agent: "规划者", timestamp: ts });
@@ -163,14 +153,34 @@ export function useSSE(): UseSSEReturn {
           break;
         }
         case "tool_call": {
-          const tool = String(data.tool || "未知工具");
-          setToolCalls((prev) => [...prev, data as unknown as ToolCall]);
-          addEvent({ id: ts, type: "tool_call", content: `调用工具：${tool}`, agent: "工具执行", timestamp: ts });
+          const incoming = data as unknown as ToolCall;
+          const agent = String(incoming.agent || "智能体");
+          const ok = incoming.success === false ? " ✗" : " ✓";
+          setToolCalls((prev) => [...prev, incoming]);
+          addEvent({
+            id: ts,
+            type: "tool_call",
+            content: describeToolCall(incoming) + ok,
+            agent,
+            timestamp: ts,
+          });
           break;
         }
         case "approval_required": {
           const toolName = String(data.tool_name || data.tool || "未知");
-          setApprovals((prev) => [...prev, data as unknown as ApprovalRequest]);
+          const incoming = data as unknown as ApprovalRequest;
+          // Upsert by id: the gate emits once at request time (status: pending)
+          // and the final ledger may re-emit with the resolved status. Avoid
+          // duplicate cards by replacing an existing entry with the same id.
+          setApprovals((prev) => {
+            const idx = prev.findIndex((a) => a.id === incoming.id);
+            if (idx >= 0) {
+              const next = [...prev];
+              next[idx] = { ...next[idx], ...incoming };
+              return next;
+            }
+            return [...prev, incoming];
+          });
           addEvent({ id: ts, type: "approval", content: `需要审批：${toolName}`, agent: "编排器", timestamp: ts });
           break;
         }
@@ -182,8 +192,9 @@ export function useSSE(): UseSSEReturn {
           break;
         case "progress": {
           const msg = String(data.message || "");
-          const pct = data.percent || 0;
-          addEvent({ id: ts, type: "reflection", content: `[${pct}%] ${msg}`, agent: "系统", timestamp: ts });
+          const pct = data.percent;
+          const text = typeof pct === "number" ? `[${pct}%] ${msg}` : msg;
+          addEvent({ id: ts, type: "reflection", content: text, agent: "系统", timestamp: ts });
           break;
         }
         case "summary":

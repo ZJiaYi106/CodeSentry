@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.security.permissions import RiskLevel  # canonical definition
+
 
 class ModelProvider(str, Enum):
     OPENAI = "openai"
@@ -16,17 +18,16 @@ class ModelProvider(str, Enum):
     HERMES = "hermes"
 
 
-class RiskLevel(str, Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
+# Resolve .env relative to the project root so it works whether the backend is
+# launched from ./backend or from the repository root.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
     """All application settings, loaded from .env / environment."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=[_PROJECT_ROOT / ".env", _PROJECT_ROOT / "backend" / ".env"],
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
@@ -72,6 +73,8 @@ class Settings(BaseSettings):
     # --- ChromaDB ---
     chroma_host: str = "chromadb"
     chroma_port: int = 8000
+    chroma_embedding_enabled: bool = True
+    hf_endpoint: str = ""  # e.g. https://hf-mirror.com for fast downloads in China
 
     # --- Redis ---
     redis_host: str = "redis"

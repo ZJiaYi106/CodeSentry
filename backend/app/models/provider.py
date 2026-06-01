@@ -75,15 +75,38 @@ _FACTORIES = {
     ModelProvider.HERMES: _create_hermes_model,
 }
 
+# Keys that clearly indicate "no real API key configured". For a cloud
+# provider these would only make every LLM call hang until its timeout, so we
+# fail fast and let agents fall back to the rule-based pipeline instead.
+_PLACEHOLDER_KEYS = {"", "sk-your-api-key-here", "your-api-key-here", "not-needed"}
+
+
+def _has_real_api_key(provider: ModelProvider, key: str) -> bool:
+    """True if the configured key is worth actually calling the LLM with."""
+    if provider == ModelProvider.HERMES:
+        # Local / OpenAI-compatible endpoints may not require a key.
+        return True
+    return key not in _PLACEHOLDER_KEYS
+
 
 def get_model() -> BaseChatModel:
     """Return the configured chat model, creating it on first call.
 
     Re-creates the instance if MODEL_PROVIDER or MODEL_NAME has changed.
+
+    Raises ValueError when a cloud provider is configured with a placeholder
+    key — callers (planner/reflector/summarizer/sub-agents) treat this as a
+    signal to use their rule-based fallback instead of hanging on the network.
     """
     global _model, _model_provider, _model_name
 
     settings = get_settings()
+    if not _has_real_api_key(settings.model_provider, settings.model_api_key):
+        raise ValueError(
+            f"MODEL_API_KEY is not configured for provider "
+            f"'{settings.model_provider.value}'. Set a real key in .env, or "
+            f"run without an LLM (agents use the rule-based fallback)."
+        )
     if (
         _model is None
         or _model_provider != settings.model_provider

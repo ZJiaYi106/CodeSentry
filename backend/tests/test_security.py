@@ -56,6 +56,13 @@ class TestApprovalLogic:
         assert needs_approval("run_tests", RiskLevel.HIGH) is False
         assert needs_approval("write_patch", RiskLevel.HIGH) is False
 
+    def test_auto_approve_none(self):
+        """With auto_approve=none, EVERY tool — even read-only — needs approval."""
+        assert needs_approval("list_files", RiskLevel.NONE) is True
+        assert needs_approval("read_file", RiskLevel.NONE) is True
+        assert needs_approval("run_tests", RiskLevel.NONE) is True
+        assert needs_approval("write_patch", RiskLevel.NONE) is True
+
 
 class TestApprovalRequest:
     def test_creates_pending_request(self):

@@ -80,6 +80,10 @@ async def tool_executor_node(state: dict[str, Any]) -> dict[str, Any]:
         state["current_step_index"] = idx + 1
         return state
 
+    # TODO: single-agent path does not yet route through an ApprovalGate.
+    # The default API path uses use_orchestrator=True (multi-agent), which
+    # DOES gate write_patch/run_tests. Wire a gate here if the single-agent
+    # path is exposed to untrusted input.
     # Execute the tool
     workspace = state.get("workspace_root", "/workspace")
     registry = ToolRegistry(workspace)
@@ -240,11 +244,19 @@ async def run_orchestrator_agent(
     task: str,
     workspace_root: str,
     auto_approve_risk: str = "low",
+    approval_gate: Any = None,
+    emit: Any = None,
 ) -> dict[str, Any]:
     """Run the multi-agent Orchestrator workflow.
 
     This uses the Orchestrator → Analyst → Implementer → Reviewer pipeline
     instead of the single-agent LangGraph loop.
+
+    ``approval_gate`` may be an :class:`ApprovalGate` (HTTP/SSE path, blocks
+    until the user resolves) or ``None`` (auto-approve, for direct usage).
+
+    ``emit`` is an optional (event_type, data) -> None sink for live SSE
+    progress / tool_call events.
 
     Returns a dict with the full orchestrator result, suitable for API responses.
     """
@@ -252,7 +264,12 @@ async def run_orchestrator_agent(
     from app.security.permissions import RiskLevel
 
     risk = RiskLevel(auto_approve_risk)
-    orch = Orchestrator(workspace_root=workspace_root, auto_approve_risk=risk)
+    orch = Orchestrator(
+        workspace_root=workspace_root,
+        auto_approve_risk=risk,
+        approval_gate=approval_gate,
+        emit=emit,
+    )
     result = await orch.run(task)
 
     return {
@@ -266,6 +283,7 @@ async def run_orchestrator_agent(
             {
                 "id": a.id,
                 "tool": a.tool_name,
+                "arguments": a.arguments,
                 "risk": a.risk_level.value,
                 "reason": a.reason,
                 "status": a.status.value,

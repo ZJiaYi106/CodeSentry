@@ -11,7 +11,10 @@ semantic similarity search when starting new tasks.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -20,6 +23,15 @@ from typing import Any
 from app.config import get_settings
 
 logger = logging.getLogger("codesentry.memory.long_term")
+
+# ChromaDB operations are synchronous and can block on first use (e.g. the
+# DefaultEmbeddingFunction downloads its ~80MB model). Run them in a thread
+# with a hard timeout so a slow/unreachable network never stalls the pipeline.
+MEMORY_CALL_TIMEOUT = 120.0  # seconds
+
+# Serializes all ChromaDB calls so concurrent tasks don't spawn several
+# simultaneous model downloads that compete for bandwidth.
+_embedding_lock = threading.Lock()
 
 # ── Data models ────────────────────────────────────────────
 
@@ -72,12 +84,23 @@ def _get_embedding_fn():
     """Return an embedding function. Uses sentence-transformers as default.
 
     This is a LOCAL embedding model — no API key required.
+
+    - Disabled entirely when CHROMA_EMBEDDING_ENABLED=false (no ~80MB model
+      download; memory degrades to keyword matching).
+    - HF_ENDPOINT is forwarded to huggingface_hub so downloads can use a
+      mirror (e.g. https://hf-mirror.com) when the default endpoint is slow.
     """
+    settings = get_settings()
+    if not settings.chroma_embedding_enabled:
+        logger.info("ChromaDB embeddings disabled — using keyword fallback memory")
+        return None
+    if settings.hf_endpoint:
+        os.environ.setdefault("HF_ENDPOINT", settings.hf_endpoint)
     try:
         from chromadb.utils import embedding_functions
         return embedding_functions.DefaultEmbeddingFunction()
     except Exception:
-        # Ultra-minimal fallback: random embeddings (for tests only)
+        # Ultra-minimal fallback: no embeddings (for tests only)
         logger.warning("DefaultEmbeddingFunction unavailable, using fallback")
         return None
 
@@ -94,6 +117,10 @@ def _get_or_create_collection(name: str):
     """Get or create a named ChromaDB collection."""
     client = _get_chroma_client()
     ef = _get_embedding_fn()
+    if ef is None:
+        # Embeddings disabled/unavailable — fail fast so callers fall back
+        # to the keyword memory instead of blocking on a model download.
+        raise ValueError("ChromaDB embeddings disabled/unavailable")
 
     try:
         return client.get_collection(name=name, embedding_function=ef)
@@ -113,6 +140,7 @@ async def store_memory(
     content: str,
     collection: str = "fix_patterns",
     metadata: dict[str, Any] | None = None,
+    workspace_root: str | None = None,
 ) -> str:
     """Store a memory entry in the specified collection.
 
@@ -120,6 +148,8 @@ async def store_memory(
         content: The text content to store.
         collection: One of 'fix_patterns', 'project_conventions', 'user_preferences'.
         metadata: Optional dict with keys like task_type, files, language, etc.
+        workspace_root: Project the memory belongs to — memories are retrieved
+            per-workspace so one project's experience never leaks into another.
 
     Returns:
         The memory entry ID.
@@ -127,22 +157,33 @@ async def store_memory(
     if collection not in COLLECTIONS:
         raise ValueError(f"Unknown collection '{collection}'. Choose from: {list(COLLECTIONS)}")
 
+    entry_metadata = dict(metadata or {})
+    if workspace_root:
+        entry_metadata["workspace"] = workspace_root
+
     entry = MemoryEntry(
         collection=collection,
         content=content,
-        metadata=metadata or {},
+        metadata=entry_metadata,
     )
 
     try:
         col = _get_or_create_collection(collection)
-        col.add(
-            ids=[entry.id],
-            documents=[content],
-            metadatas=[{
-                **(metadata or {}),
-                "timestamp": entry.timestamp,
-                "collection": collection,
-            }],
+
+        def _add() -> None:
+            with _embedding_lock:
+                col.add(
+                    ids=[entry.id],
+                    documents=[content],
+                    metadatas=[{
+                        **entry_metadata,
+                        "timestamp": entry.timestamp,
+                        "collection": collection,
+                    }],
+                )
+
+        await asyncio.wait_for(
+            asyncio.to_thread(_add), timeout=MEMORY_CALL_TIMEOUT
         )
         logger.info(
             "MEMORY STORE | collection=%s id=%s content_len=%d",
@@ -160,6 +201,7 @@ async def search_memories(
     query: str,
     collection: str = "fix_patterns",
     n_results: int = 5,
+    workspace_root: str | None = None,
 ) -> list[dict[str, Any]]:
     """Search for relevant memories using semantic similarity.
 
@@ -167,6 +209,8 @@ async def search_memories(
         query: The search query text.
         collection: Which collection to search.
         n_results: Max number of results to return.
+        workspace_root: When given, only memories stored for this workspace
+            are returned (memories from other projects are excluded).
 
     Returns:
         List of dicts with keys: id, content, metadata, distance.
@@ -175,14 +219,33 @@ async def search_memories(
         raise ValueError(f"Unknown collection '{collection}'.")
 
     # Search fallback memory too
-    fallback_results = _search_fallback(query, collection, n_results)
+    fallback_results = _search_fallback(query, collection, n_results, workspace_root)
 
     try:
         col = _get_or_create_collection(collection)
-        if col.count() == 0:
+
+        def _count() -> int:
+            with _embedding_lock:
+                return col.count()
+
+        if await asyncio.wait_for(
+            asyncio.to_thread(_count), timeout=MEMORY_CALL_TIMEOUT
+        ) == 0:
             return fallback_results
 
-        results = col.query(query_texts=[query], n_results=n_results)
+        def _query() -> Any:
+            with _embedding_lock:
+                kwargs: dict[str, Any] = {
+                    "query_texts": [query],
+                    "n_results": n_results,
+                }
+                if workspace_root:
+                    kwargs["where"] = {"workspace": {"$eq": workspace_root}}
+                return col.query(**kwargs)
+
+        results = await asyncio.wait_for(
+            asyncio.to_thread(_query), timeout=MEMORY_CALL_TIMEOUT
+        )
         entries = []
         ids = results.get("ids", [[]])[0]
         docs = results.get("documents", [[]])[0]
@@ -212,6 +275,7 @@ async def extract_and_store_insights(
     task: str,
     final_summary: str,
     files_involved: list[str] | None = None,
+    workspace_root: str | None = None,
 ) -> list[str]:
     """After a task completes, extract key insights and store them.
 
@@ -231,6 +295,7 @@ async def extract_and_store_insights(
             content=f"Task: {task}\n\nResolution:\n{final_summary[:2000]}",
             collection="fix_patterns",
             metadata=meta,
+            workspace_root=workspace_root,
         ))
 
     # Store project conventions (if any files were involved)
@@ -243,6 +308,7 @@ async def extract_and_store_insights(
                 "files": ",".join(files_involved),
                 "source": "auto_extracted",
             },
+            workspace_root=workspace_root,
         ))
     else:
         # Store even without specific files — general task experience
@@ -253,6 +319,7 @@ async def extract_and_store_insights(
                 "task_type": "general",
                 "source": "auto_extracted",
             },
+            workspace_root=workspace_root,
         ))
 
     logger.info("MEMORY EXTRACT | stored %d insights for task", len(ids))
@@ -303,14 +370,21 @@ async def clear_collection(collection: str, clear_fallback: bool = False) -> int
 _fallback_memory: list[MemoryEntry] = []
 
 
-def _search_fallback(query: str, collection: str, n_results: int) -> list[dict[str, Any]]:
-    """Simple keyword-based fallback search."""
+def _search_fallback(
+    query: str,
+    collection: str,
+    n_results: int,
+    workspace_root: str | None = None,
+) -> list[dict[str, Any]]:
+    """Simple keyword-based fallback search, optionally scoped per workspace."""
     query_lower = query.lower()
     keywords = set(query_lower.split())
     scored = []
 
     for entry in _fallback_memory:
         if entry.collection != collection:
+            continue
+        if workspace_root and entry.metadata.get("workspace") != workspace_root:
             continue
         content_lower = entry.content.lower()
         score = sum(1 for kw in keywords if kw in content_lower)

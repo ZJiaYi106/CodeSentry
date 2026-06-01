@@ -18,6 +18,10 @@ class TaskRequest(BaseModel):
     auto_approve_risk: str = Field(default="low", description="Auto-approve risk level: low, medium, high, none")
     max_iterations: int = Field(default=15, ge=1, le=100, description="Max agent loop iterations")
     use_orchestrator: bool = Field(default=True, description="Use multi-agent orchestrator instead of single agent")
+    followup_of: str | None = Field(
+        default=None,
+        description="Task ID of a previous task this question follows up on. Its final report is injected as context.",
+    )
 
 
 class ApprovalAction(BaseModel):

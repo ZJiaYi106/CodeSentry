@@ -116,6 +116,71 @@ class TestApproval:
         assert resp2.status_code in (400, 404)
 
 
+class TestFollowUp:
+    def test_followup_of_unknown_task_404(self, client):
+        resp = client.post("/api/v1/tasks", json={
+            "task": "追问一个问题",
+            "followup_of": "task-nonexistent",
+        })
+        assert resp.status_code == 404
+
+    def test_build_followup_task_injects_previous_report(self):
+        from app.api.routes import _build_followup_task
+
+        previous = {
+            "task": "分析项目结构",
+            "result": {"final_summary": "# 报告\n项目包含 3 个模块。"},
+        }
+        text = _build_followup_task("模块 A 的职责是什么？", previous)
+        assert "分析项目结构" in text
+        assert "项目包含 3 个模块" in text
+        assert "模块 A 的职责是什么？" in text
+
+    def test_create_followup_after_task(self, client):
+        resp = client.post("/api/v1/tasks", json={"task": "分析这个项目"})
+        assert resp.status_code == 201
+        first_id = resp.json()["task_id"]
+
+        resp2 = client.post("/api/v1/tasks", json={
+            "task": "它用了什么数据库？",
+            "followup_of": first_id,
+        })
+        assert resp2.status_code == 201
+        assert resp2.json()["task_id"] != first_id
+
+
+class TestBrowse:
+    def test_browse_lists_subdirectories(self, client):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "sub_a").mkdir()
+            (Path(tmp) / "sub_b").mkdir()
+            (Path(tmp) / "file.txt").write_text("x")
+
+            resp = client.get("/api/v1/browse", params={"path": tmp})
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["path"] == tmp
+            names = {e["name"] for e in data["entries"]}
+            assert names == {"sub_a", "sub_b"}  # only directories, not files
+
+    def test_browse_root_without_path(self, client):
+        resp = client.get("/api/v1/browse")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "entries" in data
+        assert "parent" in data
+
+    def test_browse_invalid_path(self, client):
+        resp = client.get(
+            "/api/v1/browse",
+            params={"path": "Z:\\definitely\\not\\a\\real\\dir"},
+        )
+        assert resp.status_code == 400
+
+
 class TestTaskExecution:
     @pytest.mark.skip(reason="Background task blocks sync TestClient event loop — tested via integration")
     def test_full_task_lifecycle(self, client):

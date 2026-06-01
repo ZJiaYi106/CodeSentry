@@ -36,17 +36,31 @@ class TestModelProvider:
         from langchain_core.language_models import BaseChatModel
         assert isinstance(model, BaseChatModel)
 
-    def test_get_model_caches(self):
+    def test_get_model_caches(self, monkeypatch):
+        from app.config import get_settings
+        monkeypatch.setattr(get_settings(), "model_api_key", "sk-test")
+        reset_model_cache()
         m1 = get_model()
         m2 = get_model()
         assert m1 is m2
 
-    def test_reset_model_cache(self):
+    def test_reset_model_cache(self, monkeypatch):
+        from app.config import get_settings
+        monkeypatch.setattr(get_settings(), "model_api_key", "sk-test")
+        reset_model_cache()
         m1 = get_model()
         reset_model_cache()
         m2 = get_model()
         # After reset, a new instance is created
         assert m1 is not m2
+
+    def test_placeholder_key_raises(self, monkeypatch):
+        """A cloud provider with a placeholder key must fail fast (no hang)."""
+        from app.config import get_settings
+        monkeypatch.setattr(get_settings(), "model_api_key", "sk-your-api-key-here")
+        reset_model_cache()
+        with pytest.raises(ValueError):
+            get_model()
 
     def test_invalid_provider_raises(self, monkeypatch):
         from app.config import get_settings

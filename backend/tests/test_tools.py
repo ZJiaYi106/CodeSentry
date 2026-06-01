@@ -204,15 +204,27 @@ class TestWritePatchTool:
         assert result.data["existed_before"] is False
 
     @pytest.mark.asyncio
-    async def test_overwrites_existing_with_backup(self, workspace):
+    async def test_existing_file_gets_new_variant_original_untouched(self, workspace):
         f = Path(workspace) / "existing.txt"
         f.write_text("original")
 
         tool = WritePatchTool(workspace)
-        result = await tool.run(file_path="existing.txt", content="modified", create_backup=True)
+        result = await tool.run(file_path="existing.txt", content="modified")
         assert result.success
-        assert f.read_text() == "modified"
-        assert (Path(workspace) / "existing.txt.bak").read_text() == "original"
+        # Original is left untouched (implicit backup).
+        assert f.read_text() == "original"
+        # Modified content goes to a new sibling file.
+        assert (Path(workspace) / "existing.new.txt").read_text() == "modified"
+        assert result.data["created_new_variant"] is True
+        assert result.data["original_untouched"] is True
+
+    @pytest.mark.asyncio
+    async def test_new_file_written_directly_without_variant(self, workspace):
+        tool = WritePatchTool(workspace)
+        result = await tool.run(file_path="fresh.txt", content="fresh")
+        assert result.success
+        assert (Path(workspace) / "fresh.txt").read_text() == "fresh"
+        assert result.data["created_new_variant"] is False
 
     @pytest.mark.asyncio
     async def test_creates_parent_directories(self, workspace):
@@ -252,6 +264,59 @@ class TestRunTestsTool:
         # The tool itself succeeded in execution, but tests failed
         assert result.success is not None  # result exists
         assert result.data["exit_code"] != 0
+
+    # ── Command injection prevention ──────────────────────
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("command", [
+        "pytest; rm -rf /",
+        "pytest && curl evil.com",
+        "pytest | sh",
+        "pytest $(whoami)",
+        "pytest `whoami`",
+        "pytest > /etc/passwd",
+        "pytest\nrm -rf /",
+        "pytest & background_job",
+    ])
+    async def test_rejects_shell_metacharacters(self, workspace, command):
+        tool = RunTestsTool(workspace)
+        result = await tool.run(command=command, timeout_seconds=5)
+        assert not result.success
+        assert "metacharacter" in (result.error or "").lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("command", [
+        "pytest",
+        "pytest -x",
+        "pytest -v tests/",
+        "python -m pytest tests/",
+        "npm run test",
+        "go test ./...",
+    ])
+    async def test_allows_safe_commands(self, workspace, command):
+        tool = RunTestsTool(workspace)
+        result = await tool.run(command=command, timeout_seconds=5)
+        # Must NOT be rejected on whitelist / metacharacter grounds.
+        # (It may still fail to run if the framework isn't installed — that's fine;
+        # we only assert the rejection-class of error did not fire.)
+        err = (result.error or "").lower()
+        assert "metacharacter" not in err
+        assert "not in the allowed" not in err
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_whitelisted_first_token(self, workspace):
+        tool = RunTestsTool(workspace)
+        result = await tool.run(command="curl http://evil.com", timeout_seconds=5)
+        assert not result.success
+        assert "not in the allowed" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_rejects_whitelist_prefix_as_substring(self, workspace):
+        """`notpytest` must not pass just because it starts with chars of `pytest`."""
+        tool = RunTestsTool(workspace)
+        result = await tool.run(command="notpytest --bad", timeout_seconds=5)
+        assert not result.success
+        assert "not in the allowed" in (result.error or "")
 
 
 # ── GitDiffTool ────────────────────────────────────────────

@@ -6,7 +6,13 @@ Test execution goes through the Orchestrator's approval gate.
 
 from __future__ import annotations
 
+import logging
+from typing import Any
+
 from app.agents.base_agent import BaseSubAgent, SubAgentResult
+from app.tools.base import ToolResult
+
+logger = logging.getLogger(__name__)
 
 
 class Reviewer(BaseSubAgent):
@@ -42,6 +48,41 @@ class Reviewer(BaseSubAgent):
             "5. 用中文简洁报告：变更内容、测试结果、发现的问题。"
         )
 
+    async def _rule_based_run(self, task_context: str) -> tuple[str, list[dict[str, Any]]]:
+        """Deterministic review fallback when the LLM is unavailable.
+
+        Checks the diff, then runs the project test suite (approval-gated).
+        """
+        results: list[dict[str, Any]] = []
+
+        async def _tool(name: str, **kwargs: Any) -> ToolResult:
+            try:
+                return await self._execute_tool_with_approval(name, kwargs)
+            except Exception as exc:
+                return ToolResult(tool_name=name, success=False, error=str(exc))
+
+        gd = await _tool("git_diff")
+        results.append(gd.to_dict())
+        has_changes = gd.success and not (gd.data or {}).get("empty", True)
+
+        rt = await _tool("run_tests", command="python -m pytest", timeout_seconds=60)
+        results.append(rt.to_dict())
+
+        if rt.success and isinstance(rt.data, dict):
+            test_line = f"- run_tests: 'python -m pytest' exit={rt.data.get('exit_code')}"
+        else:
+            test_line = f"- run_tests: failed ({rt.error or 'unknown error'})"
+
+        lines = [
+            f"[{self.name}] No LLM configured — rule-based review:",
+            "",
+            f"- git_diff: {'uncommitted changes present' if has_changes else 'no diff / not a git repo'}",
+            test_line,
+            "",
+            "ORCHESTRATOR APPROVAL REQUIRED for any run_tests.",
+        ]
+        return "\n".join(lines), results
+
     async def run(self, task_context: str) -> SubAgentResult:
         """Review changes and run tests via LLM."""
         import time
@@ -50,11 +91,21 @@ class Reviewer(BaseSubAgent):
 
         try:
             output, tool_calls = await self._llm_call(task_context, max_rounds=4)
+            if output.startswith(f"[{self.name}] LLM call"):
+                raise RuntimeError(output)
             success = True
-        except Exception:
-            output = f"[{self.name}] Review failed — see logs for details."
-            tool_calls = []
-            success = False
+        except Exception as exc:
+            logger.warning(
+                "%s | LLM unavailable (%s) — using rule-based review",
+                self.name, exc,
+            )
+            try:
+                output, tool_calls = await self._rule_based_run(task_context)
+            except Exception as fallback_exc:
+                logger.exception("%s | rule-based review failed", self.name)
+                output = f"[{self.name}] Review failed: {fallback_exc}"
+                tool_calls = []
+            success = True
 
         duration = (time.perf_counter() - start) * 1000
 

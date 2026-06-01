@@ -13,6 +13,9 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
+from app.security.approval_gate import AutoApproveGate, EmitFn, _BaseGate
+from app.security.permissions import RiskLevel, get_tool_risk, needs_approval
+from app.tools.base import ToolResult
 from app.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -44,9 +47,30 @@ class BaseSubAgent:
     description: str = ""
     allowed_tools: list[str] = []  # tool names this agent may use
 
-    def __init__(self, workspace_root: str):
+    def __init__(
+        self,
+        workspace_root: str,
+        auto_approve_risk: RiskLevel = RiskLevel.LOW,
+        approval_gate: _BaseGate | None = None,
+        emit: EmitFn | None = None,
+    ):
         self.workspace_root = workspace_root
         self._registry = ToolRegistry(workspace_root)
+        self.auto_approve_risk = auto_approve_risk
+        # None is resolved lazily to AutoApproveGate at first gated call, so
+        # direct/demo usage (no human) stays non-blocking yet auditable.
+        self.approval_gate = approval_gate
+        # Live SSE event sink (progress / tool_call). None in direct usage.
+        self._emit = emit
+
+    def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
+        """Push a live event to the SSE stream if a sink is wired in."""
+        if self._emit is None:
+            return
+        try:
+            self._emit(event_type, data)
+        except Exception:  # never let SSE plumbing break the agent
+            logger.debug("%s | emit failed", self.name)
 
     @property
     def tools(self) -> list[Any]:
@@ -75,9 +99,10 @@ class BaseSubAgent:
     ) -> tuple[str, list[dict[str, Any]]]:
         """Call the LLM with this agent's tools, handling the tool-calling loop.
 
-        Pattern: tool-calling call → execute tools → text-only call → result.
-        This two-step pattern ensures the LLM converges to a text answer
-        instead of looping on tool calls forever.
+        Pattern: call WITH tools → execute any tool calls → loop. The model may
+        keep calling tools across rounds (multi-round exploration) and finishes
+        when it returns a text answer WITHOUT tool calls. A single text-only
+        call is used only as a wrap-up when max_rounds is exhausted.
 
         Each individual LLM call has a 90-second asyncio hard deadline
         (in addition to the 120-second HTTP-level request_timeout on the model).
@@ -91,6 +116,30 @@ class BaseSubAgent:
         LLM_CALL_TIMEOUT = 90  # seconds per individual LLM invocation
 
         model = get_model()
+
+        async def _invoke_with_retry(
+            awaitable_factory, attempts: int = 2
+        ):
+            """Invoke the LLM with a hard timeout, retrying once on timeout.
+
+            Transient API slowness (especially on shared endpoints at peak
+            hours) is common — a single retry recovers most of these.
+            """
+            last_exc: Exception | None = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    return await asyncio.wait_for(
+                        awaitable_factory(), timeout=LLM_CALL_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    last_exc = asyncio.TimeoutError(
+                        f"LLM call timed out after {LLM_CALL_TIMEOUT}s"
+                    )
+                    logger.warning(
+                        "%s | LLM call timed out (attempt %d/%d), retrying…",
+                        self.name, attempt, attempts,
+                    )
+            raise last_exc  # type: ignore[misc]
 
         # Build tool schemas and name→instance map for this agent
         tool_schemas: list[dict[str, Any]] = []
@@ -114,15 +163,20 @@ class BaseSubAgent:
 
         tool_calls_record: list[dict[str, Any]] = []
 
+        model_with_tools = model.bind_tools(tool_schemas)
+
         for round_num in range(max_rounds):
-            # ── Step A: Call WITH tools ──────────────────────
+            # ── Call WITH tools ───────────────────────────────
             logger.info("%s | round %d: calling with tools", self.name, round_num + 1)
+            self._emit_event("progress", {
+                "message": (
+                    f"{self.name} 正在思考下一步行动（第 {round_num + 1}/{max_rounds} 轮）…"
+                ),
+            })
 
             try:
-                model_with_tools = model.bind_tools(tool_schemas)
-                response = await asyncio.wait_for(
-                    model_with_tools.ainvoke(conversation),
-                    timeout=LLM_CALL_TIMEOUT,
+                response = await _invoke_with_retry(
+                    lambda: model_with_tools.ainvoke(conversation)
                 )
             except asyncio.TimeoutError:
                 logger.error("%s | LLM call timed out in round %d", self.name, round_num + 1)
@@ -137,13 +191,13 @@ class BaseSubAgent:
                     tool_calls_record,
                 )
 
-            # If NO tool calls — this is a text response, return it
+            # If NO tool calls — the model has finished exploring; return its text.
             if not (hasattr(response, "tool_calls") and response.tool_calls):
                 content = self._extract_text(response)
                 logger.info("%s | done (no tool calls) in round %d", self.name, round_num + 1)
                 return content, tool_calls_record
 
-            # ── Step B: Execute all tool calls ───────────────
+            # ── Execute all tool calls ─────────────────────────
             conversation.append(response)
 
             for tc in response.tool_calls:
@@ -158,15 +212,71 @@ class BaseSubAgent:
                 )
 
                 if tool_name in tool_map:
+                    # ── Approval gate: check BEFORE executing risky tools ──
+                    # This is the real interception point. Tools whose risk
+                    # exceeds the auto-approve threshold must be approved
+                    # before they touch the filesystem / run commands.
+                    try:
+                        gated = needs_approval(tool_name, self.auto_approve_risk)
+                    except ValueError:
+                        gated = False  # unknown tool — handled by the else-branch below
+
+                    if gated:
+                        risk = get_tool_risk(tool_name)
+                        gate = self.approval_gate or AutoApproveGate()
+                        self.approval_gate = gate  # reuse for subsequent calls
+                        decision = await gate.request(
+                            tool_name, tool_args, self.name, risk
+                        )
+                        if not decision.approved:
+                            logger.warning(
+                                "%s | tool '%s' DENIED (%s) — not executed",
+                                self.name, tool_name, decision.reason,
+                            )
+                            denied = ToolResult(
+                                tool_name=tool_name,
+                                success=False,
+                                error=f"Approval denied: {decision.reason}",
+                                risk_level=risk,
+                            )
+                            tool_calls_record.append(denied.to_dict())
+                            self._emit_event("tool_call", {
+                                "agent": self.name,
+                                **denied.to_dict(),
+                            })
+                            conversation.append(ToolMessage(
+                                content=(
+                                    f"Tool '{tool_name}' was NOT approved "
+                                    f"({decision.reason}) and was NOT executed. "
+                                    f"Adjust your plan accordingly."
+                                ),
+                                tool_call_id=tc_id,
+                            ))
+                            continue  # skip execution, move to next tool call
+
                     try:
                         result = await tool_map[tool_name].run(**tool_args)
                         tool_calls_record.append(result.to_dict())
+                        self._emit_event("tool_call", {
+                            "agent": self.name,
+                            **result.to_dict(),
+                        })
                         conversation.append(ToolMessage(
                             content=json.dumps(result.data, ensure_ascii=False, default=str),
                             tool_call_id=tc_id,
                         ))
                     except Exception as exc:
                         logger.error("%s | tool error: %s", self.name, exc)
+                        failed = ToolResult(
+                            tool_name=tool_name,
+                            success=False,
+                            error=str(exc),
+                        )
+                        tool_calls_record.append(failed.to_dict())
+                        self._emit_event("tool_call", {
+                            "agent": self.name,
+                            **failed.to_dict(),
+                        })
                         conversation.append(ToolMessage(
                             content=f"Tool execution error: {exc}",
                             tool_call_id=tc_id,
@@ -177,47 +287,69 @@ class BaseSubAgent:
                         tool_call_id=tc_id,
                     ))
 
-            # ── Step C: Text-only call to produce answer ─────
+            # ── Nudge: exploration may continue, or the model can finish ──
             conversation.append(HumanMessage(
-                content="以上是工具返回的结果。现在请用纯文本给出最终回答。"
-                "不要使用 <invoke> <parameter> 等 XML 标签，不要调用工具，"
-                "直接用 markdown 格式总结你发现的内容并回答原始任务。"
+                content=(
+                    "工具执行结果已返回（见上方 ToolMessage）。"
+                    "如果还需要更多信息才能完成任务，请在下一轮继续调用工具深入探索"
+                    "（例如深入子目录、读取关键文件、搜索代码）；"
+                    "如果信息已经足够，请直接输出最终结论，不要调用任何工具。"
+                )
             ))
 
-            try:
-                final_response = await asyncio.wait_for(
-                    model.ainvoke(conversation),
-                    timeout=LLM_CALL_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                logger.error("%s | text-only call timed out in round %d", self.name, round_num + 1)
-                return (
-                    f"[{self.name}] Text response timed out after {LLM_CALL_TIMEOUT}s",
-                    tool_calls_record,
-                )
-            except Exception as exc:
-                logger.error("%s | text-only call failed: %s", self.name, exc)
-                return (
-                    f"[{self.name}] Error getting final response: {exc}",
-                    tool_calls_record,
-                )
-
-            # If the text-only response also has tool_calls (model ignored our nudge),
-            # strip the nudge, keep the tool_call response, and loop again
-            if hasattr(final_response, "tool_calls") and final_response.tool_calls:
-                logger.warning("%s | model ignored text-only nudge, looping", self.name)
-                conversation.pop()  # remove the nudge message
-                continue
-
-            content = self._extract_text(final_response)
-            logger.info("%s | done in round %d", self.name, round_num + 1)
-            return content, tool_calls_record
-
-        logger.warning("%s | max rounds (%d) reached", self.name, max_rounds)
-        return (
-            f"[{self.name}] Reached max rounds ({max_rounds}). Task may be too complex.",
-            tool_calls_record,
+        # ── Max rounds reached: one final text-only call to wrap up ──
+        logger.warning(
+            "%s | max rounds (%d) reached — finalizing with a text-only call",
+            self.name, max_rounds,
         )
+        conversation.append(HumanMessage(
+            content=(
+                "已达到最大工具调用轮数。请基于已有的全部信息，用纯文本给出最终回答，"
+                "不要使用 <invoke> <parameter> 等 XML 标签。"
+            )
+        ))
+        try:
+            final_response = await _invoke_with_retry(
+                lambda: model.ainvoke(conversation)
+            )
+        except Exception as exc:
+            logger.error("%s | final text-only call failed: %s", self.name, exc)
+            return (
+                f"[{self.name}] Reached max rounds ({max_rounds}). Task may be too complex.",
+                tool_calls_record,
+            )
+
+        content = self._extract_text(final_response)
+        logger.info("%s | done (max rounds wrap-up)", self.name)
+        return content, tool_calls_record
+
+    async def _execute_tool_with_approval(
+        self, tool_name: str, tool_args: dict[str, Any]
+    ) -> ToolResult:
+        """Execute a tool, routing gated tools through the approval gate.
+
+        Used by the rule-based fallbacks (no LLM configured) so that risky
+        tools (write_patch / run_tests) still respect the approval boundary
+        instead of silently executing.
+        """
+        tool = self._registry.get(tool_name)
+        try:
+            gated = needs_approval(tool_name, self.auto_approve_risk)
+        except ValueError:
+            gated = False
+        if gated:
+            risk = get_tool_risk(tool_name)
+            gate = self.approval_gate or AutoApproveGate()
+            self.approval_gate = gate
+            decision = await gate.request(tool_name, tool_args, self.name, risk)
+            if not decision.approved:
+                return ToolResult(
+                    tool_name=tool_name,
+                    success=False,
+                    error=f"Approval denied: {decision.reason}",
+                    risk_level=risk,
+                )
+        return await tool.run(**tool_args)
 
     @staticmethod
     def _extract_text(response: Any) -> str:

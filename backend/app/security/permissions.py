@@ -11,9 +11,13 @@ logger = logging.getLogger(__name__)
 
 
 class RiskLevel(str, Enum):
+    """Risk levels, ordered low → high.  NONE means "auto-approve nothing" —
+    every tool, including LOW-risk ones, requires manual approval."""
+
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+    NONE = "none"
 
 
 class ApprovalStatus(str, Enum):
@@ -73,6 +77,7 @@ def needs_approval(tool_name: str, auto_approve_risk: RiskLevel) -> bool:
     Example: if auto_approve_risk = LOW, then MEDIUM and HIGH tools need approval.
     """
     risk = get_tool_risk(tool_name)
-    risk_order = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2}
+    # NONE (-1) → every risk level (>= 0) needs approval.
+    risk_order = {RiskLevel.NONE: -1, RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2}
     threshold = risk_order.get(auto_approve_risk, 0)
     return risk_order[risk] > threshold

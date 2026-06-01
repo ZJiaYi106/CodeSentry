@@ -6,6 +6,7 @@ import Timeline from "./components/Timeline";
 import ToolCallCard from "./components/ToolCallCard";
 import ApprovalCard from "./components/ApprovalCard";
 import FinalSummary from "./components/FinalSummary";
+import FollowUpInput from "./components/FollowUpInput";
 import "./App.css";
 
 const App: React.FC = () => {
@@ -24,10 +25,14 @@ const App: React.FC = () => {
 
   const [taskId, setTaskId] = React.useState<string | null>(null);
   const [hasStarted, setHasStarted] = React.useState(false);
+  const [lastWorkspace, setLastWorkspace] = React.useState("/workspace");
+  const [followupQuestion, setFollowupQuestion] = React.useState<string | null>(null);
 
-  const handleStartTask = async (task: string, workspace: string) => {
+  const handleStartTask = async (task: string, workspace: string, followupOf?: string) => {
     setHasStarted(true);
-    const tid = await startTask(task, workspace);
+    setLastWorkspace(workspace);
+    setFollowupQuestion(followupOf ? task : null);
+    const tid = await startTask(task, workspace, followupOf);
     setTaskId(tid);
   };
 
@@ -37,7 +42,11 @@ const App: React.FC = () => {
     }
   };
 
-  const isRunning = running || (!!taskId && (connected || events.length > 0));
+  // Only the `running` flag from useSSE reflects the actual task lifecycle
+  // (set true on submit, false on "done"/stream end/timeout). Deriving
+  // "running" from connected/events makes it sticky — events stay populated
+  // after the task ends, which would disable inputs forever.
+  const isRunning = running;
   const showResults = hasStarted || isRunning;
 
   return (
@@ -81,8 +90,15 @@ const App: React.FC = () => {
               />
             )}
 
-            {summary && <FinalSummary summary={summary} error={error} />}
-            {error && !summary && <FinalSummary summary={null} error={error} />}
+            {summary && <FinalSummary summary={summary} error={error} question={followupQuestion} />}
+            {error && !summary && <FinalSummary summary={null} error={error} question={followupQuestion} />}
+
+            {summary && !isRunning && (
+              <FollowUpInput
+                onSubmit={(q) => handleStartTask(q, lastWorkspace, taskId ?? undefined)}
+                disabled={isRunning}
+              />
+            )}
           </section>
 
           <section className="right-panel">

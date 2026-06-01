@@ -8,7 +8,13 @@ import pytest
 
 from app.agents.base_agent import BaseSubAgent, SubAgentResult
 from app.agents.implementer import Implementer
-from app.agents.orchestrator import Orchestrator, OrchestratorPhase, OrchestratorResult
+from app.agents.orchestrator import (
+    Orchestrator,
+    OrchestratorPhase,
+    OrchestratorResult,
+    TaskIntent,
+    classify_task_intent,
+)
 from app.agents.repo_analyst import RepoAnalyst
 from app.agents.reviewer import Reviewer
 from app.security.permissions import RiskLevel
@@ -291,3 +297,89 @@ class TestToolIsolation:
         )
         assert req.risk_level == RiskLevel.HIGH
         assert req.tool_name == "write_patch"
+
+
+# ── Task intent classification ───────────────────────────
+
+class TestTaskIntent:
+    """Rule-based intent classification gates which phases run."""
+
+    def test_classify_analysis(self):
+        assert classify_task_intent("分析这个项目的架构") == TaskIntent.ANALYSIS
+        assert classify_task_intent("Explain how auth works") == TaskIntent.ANALYSIS
+
+    def test_classify_modification(self):
+        assert classify_task_intent("修复登录 bug") == TaskIntent.MODIFICATION
+        assert classify_task_intent("Add a new endpoint") == TaskIntent.MODIFICATION
+
+    def test_modification_wins_over_analysis(self):
+        assert classify_task_intent("分析并修复这个 bug") == TaskIntent.MODIFICATION
+
+    def test_classify_unknown(self):
+        assert classify_task_intent("你好世界") == TaskIntent.UNKNOWN
+
+    @pytest.mark.asyncio
+    async def test_analysis_task_skips_implement_and_review(self, tmp_path: Path):
+        (tmp_path / "main.py").write_text("def main(): pass\n")
+
+        orch = Orchestrator(workspace_root=str(tmp_path))
+        result = await orch.run("分析这个项目的代码结构")
+
+        assert result.success
+        assert result.intent == TaskIntent.ANALYSIS.value
+        assert result.analyst_result is not None
+        assert result.implementer_result is None
+        assert result.reviewer_result is None
+        skipped = [p for p in result.phases if p["status"] == "skipped"]
+        assert len(skipped) == 2
+
+
+# ── Approval-gate integration (no LLM required) ────────────
+
+class TestOrchestratorApprovalGate:
+    """Verify the orchestrator wires a real gate and enforces isolation,
+    without depending on an LLM backend."""
+
+    def test_defaults_to_auto_approve_gate(self, tmp_path: Path):
+        from app.security.approval_gate import AutoApproveGate
+
+        orch = Orchestrator(workspace_root=str(tmp_path))
+        # No human in the loop → AutoApproveGate, so demos/tests still run,
+        # but auto-approvals are recorded rather than silent.
+        assert isinstance(orch.approval_gate, AutoApproveGate)
+
+    def test_sub_agents_share_the_gate(self, tmp_path: Path):
+        orch = Orchestrator(workspace_root=str(tmp_path))
+        assert orch.analyst.approval_gate is orch.approval_gate
+        assert orch.implementer.approval_gate is orch.approval_gate
+        assert orch.reviewer.approval_gate is orch.approval_gate
+
+    def test_sub_agents_inherit_auto_approve_risk(self, tmp_path: Path):
+        orch = Orchestrator(
+            workspace_root=str(tmp_path), auto_approve_risk=RiskLevel.HIGH
+        )
+        assert orch.analyst.auto_approve_risk == RiskLevel.HIGH
+        assert orch.implementer.auto_approve_risk == RiskLevel.HIGH
+
+    def test_accepts_injected_gate(self, tmp_path: Path):
+        from app.security.approval_gate import ApprovalGate
+
+        gate = ApprovalGate(task_id="test-task")
+        orch = Orchestrator(
+            workspace_root=str(tmp_path), approval_gate=gate
+        )
+        assert orch.approval_gate is gate
+        assert orch.implementer.approval_gate is gate
+
+    def test_validate_sub_agent_tools_enforced(self, tmp_path: Path):
+        """_validate_sub_agent_tools must run at construction (was dead code)."""
+        # A sub-agent with a whitelisted tool set constructs fine.
+        orch = Orchestrator(workspace_root=str(tmp_path))
+        assert orch.analyst.allowed_tools  # sanity
+
+    def test_rejects_sub_agent_with_unknown_tool(self, tmp_path: Path, monkeypatch):
+        """If a sub-agent's allowed_tools contained a non-whitelisted tool,
+        Orchestrator construction must raise (isolation invariant enforced)."""
+        monkeypatch.setattr(Implementer, "allowed_tools", ["read_file", "delete_everything"])
+        with pytest.raises(ValueError, match="unknown tool"):
+            Orchestrator(workspace_root=str(tmp_path))

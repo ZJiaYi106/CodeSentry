@@ -10,14 +10,19 @@ export interface PlanStep {
 
 /** A tool call entry. */
 export interface ToolCall {
-  id: string;
+  id?: string;
   tool: string;
-  arguments: Record<string, unknown>;
-  result: string | null;
-  risk: "low" | "medium" | "high";
-  status: "pending" | "approved" | "rejected" | "completed" | "error";
-  duration_ms: number;
-  timestamp: string;
+  arguments?: Record<string, unknown>;
+  data?: Record<string, unknown>;
+  result?: string | null;
+  risk?: "low" | "medium" | "high" | string;
+  risk_level?: "low" | "medium" | "high" | string;
+  success?: boolean;
+  error?: string | null;
+  status?: "pending" | "approved" | "rejected" | "completed" | "error" | string;
+  duration_ms?: number;
+  timestamp?: string;
+  agent?: string;
 }
 
 /** An approval request sent to the frontend. */
@@ -28,6 +33,7 @@ export interface ApprovalRequest {
   risk: "low" | "medium" | "high";
   reason: string;
   timestamp: string;
+  status?: "pending" | "approved" | "rejected" | "auto_approved";
 }
 
 /** A timeline event for the agent activity log. */
@@ -41,6 +47,7 @@ export interface TimelineEvent {
 
 /** SSE event types from the backend. */
 export type SSEEvent =
+  | { type: "ping"; data: { t: string } }
   | { type: "plan"; data: { steps: PlanStep[] } }
   | { type: "tool_call"; data: ToolCall }
   | { type: "approval_required"; data: ApprovalRequest }

@@ -91,9 +91,10 @@ async def planner_node(state: dict[str, Any]) -> dict[str, Any]:
     try:
         from app.memory.long_term import search_memories
 
-        # Search across all three collections
-        fix_results = await search_memories(task, "fix_patterns", n_results=2)
-        convention_results = await search_memories(task, "project_conventions", n_results=2)
+        # Search across all three collections (workspace-scoped where applicable)
+        workspace_root = state.get("workspace_root")
+        fix_results = await search_memories(task, "fix_patterns", n_results=2, workspace_root=workspace_root)
+        convention_results = await search_memories(task, "project_conventions", n_results=2, workspace_root=workspace_root)
         pref_results = await search_memories(task, "user_preferences", n_results=1)
 
         if fix_results or convention_results or pref_results:

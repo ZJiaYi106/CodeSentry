@@ -275,3 +275,63 @@ class TestOrchestratorMemoryIntegration:
 
         assert len(result["plan"]) >= 3
         # The fallback plan should still work — memory injection is best-effort
+
+
+# ── Workspace scoping ──────────────────────────────────────
+
+class TestWorkspaceScoping:
+    """Memories must be scoped per workspace so one project's experience
+    never leaks into another project's tasks."""
+
+    @pytest.mark.asyncio
+    async def test_store_and_search_scoped_by_workspace(self):
+        await clear_collection("fix_patterns", clear_fallback=True)
+
+        await store_memory(
+            "Fixed a typo in project A's utils.py",
+            "fix_patterns",
+            workspace_root="C:/projects/A",
+        )
+        await store_memory(
+            "Fixed a typo in project B's utils.py",
+            "fix_patterns",
+            workspace_root="C:/projects/B",
+        )
+
+        results_a = await search_memories(
+            "typo utils", "fix_patterns", workspace_root="C:/projects/A"
+        )
+        results_b = await search_memories(
+            "typo utils", "fix_patterns", workspace_root="C:/projects/B"
+        )
+        results_all = await search_memories("typo utils", "fix_patterns")
+
+        contents_a = " ".join(x["content"] for x in results_a)
+        contents_b = " ".join(x["content"] for x in results_b)
+
+        assert "project A" in contents_a
+        assert "project B" not in contents_a
+        assert "project B" in contents_b
+        assert "project A" not in contents_b
+        # Without a workspace filter, both are visible.
+        assert len(results_all) >= 2
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_stores_with_workspace(self, tmp_path):
+        """Insights stored after an orchestrator run carry the workspace path."""
+        (tmp_path / "main.py").write_text("def main(): pass\n")
+
+        from app.agents.orchestrator import Orchestrator
+        orch = Orchestrator(workspace_root=str(tmp_path))
+        result = await orch.run("Fix the null pointer bug")
+        assert result.success
+
+        # Scoped search for this workspace must see the stored insight.
+        found = await search_memories(
+            "null pointer bug", "fix_patterns", workspace_root=str(tmp_path)
+        )
+        # Scoped search for a different workspace must NOT see it.
+        other = await search_memories(
+            "null pointer bug", "fix_patterns", workspace_root=str(tmp_path) + "-other"
+        )
+        assert len(other) == 0

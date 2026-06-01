@@ -7,6 +7,12 @@ interface Props {
   taskId: string | null;
 }
 
+const RISK_CN: Record<string, string> = {
+  high: "高风险",
+  medium: "中风险",
+  low: "低风险",
+};
+
 const ApprovalCard: React.FC<Props> = ({ approvals, onResolve, taskId }) => {
   const pending = approvals.filter((a) => a.status === "pending");
   const resolved = approvals.filter((a) => a.status !== "pending");
@@ -22,7 +28,9 @@ const ApprovalCard: React.FC<Props> = ({ approvals, onResolve, taskId }) => {
           {pending.map((apr) => (
             <div key={apr.id} className="approval-item approval-pending-item">
               <div className="approval-header">
-                <span className="approval-risk high">[{apr.risk.toUpperCase()}]</span>
+                <span className={`approval-risk ${apr.risk}`}>
+                  [{RISK_CN[apr.risk] || apr.risk.toUpperCase()}]
+                </span>
                 <span className="approval-tool">{apr.tool}</span>
               </div>
               <p className="approval-reason">{apr.reason}</p>
